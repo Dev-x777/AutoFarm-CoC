@@ -1,0 +1,23 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Binaries & Android SDK downloads
+bin/platform-tools/
+bin/*.zip
+
+# Scratch files & temporary captures
+scratch/
+real_screen.png
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db

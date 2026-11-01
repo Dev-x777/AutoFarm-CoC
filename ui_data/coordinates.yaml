@@ -1,0 +1,23 @@
+# Device UI Profile for CPH2707 (OnePlus/Oppo)
+# Resolution: 2378x1080 (Landscape)
+device:
+  model: "CPH2707"
+  width: 2378
+  height: 1080
+
+home_screen:
+  battle_button:
+    bbox: [131, 868, 326, 1052] # [x1, y1, x2, y2]
+    center: [228, 960]
+    template: "ui_data/templates/btn_battle.png"
+  
+  resources:
+    gold:
+      icon_center: [2220, 60]
+      text_bbox: [1870, 30, 2170, 90]
+    elixir:
+      icon_center: [2220, 135]
+      text_bbox: [1870, 105, 2170, 165]
+    dark_elixir:
+      icon_center: [2220, 207]
+      text_bbox: [1870, 175, 2170, 235]

@@ -1,0 +1,58 @@
+device:
+  mode: adb
+  adb_path: bin/platform-tools/adb
+  serial: 3C15A4000CV00000
+  resolution:
+    width: 1920
+    height: 1080
+farming:
+  min_gold: 800000
+  min_elixir: 800000
+  min_dark_elixir: 3500
+  max_skips: 120
+  next_delay_min: 1.8
+  next_delay_max: 3.5
+  trophy_min: 1800
+  trophy_max: 2700
+attack:
+  strategy: collector_snipe
+  preferred_troop: sneaky_goblin
+  troops_per_collector: 3
+  early_surrender: true
+  loot_depletion_threshold: 0.85
+  stagnant_seconds: 7
+  max_attack_duration_seconds: 120
+walls:
+  enabled: true
+  reserve_gold: 1500000
+  reserve_elixir: 1500000
+  preferred_resource: both
+  max_upgrades_per_cycle: 10
+  wall_sample_points:
+  - - 960
+    - 540
+  - - 900
+    - 500
+  - - 1020
+    - 580
+  - - 840
+    - 460
+training:
+  auto_train: true
+  quick_train_slot: 1
+  min_army_capacity_pct: 85
+home:
+  auto_collect_resources: true
+  collect_interval_seconds: 300
+humanizer:
+  bezier_curves: true
+  touch_jitter_px: 6
+  reaction_delay_min: 0.35
+  reaction_delay_max: 0.95
+  session_break_every_attacks: 8
+  break_duration_minutes_min: 8
+  break_duration_minutes_max: 18
+dashboard:
+  host: 127.0.0.1
+  port: 8080
+  open_browser: true

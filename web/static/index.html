@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoFarm | Next-Gen Clash of Clans Automation</title>
+  <meta name="description" content="Intelligent, undetectable personal Clash of Clans farming, surgical collector sniping, and automated wall upgrading engine.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="background-mesh"></div>
+
+  <!-- Top Navigation Bar -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-logo">⚔️</div>
+      <div class="brand-text">
+        <h1>AutoFarm CoC</h1>
+        <span class="version-tag">PRO PERSONAL EDITION</span>
+      </div>
+    </div>
+
+    <div class="system-status">
+      <div id="device-badge" class="badge badge-device">
+        <span class="status-dot"></span>
+        <span id="device-label">Detecting Device...</span>
+      </div>
+      <div id="status-badge" class="badge badge-status stopped">
+        <span class="pulse-dot"></span>
+        <span id="status-label">STOPPED</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button id="btn-start" class="btn btn-primary" onclick="startBot()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        Start Bot
+      </button>
+      <button id="btn-pause" class="btn btn-secondary" onclick="pauseBot()" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        Pause
+      </button>
+      <button id="btn-stop" class="btn btn-danger" onclick="stopBot()" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
+        Stop
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Container -->
+  <main class="dashboard-container">
+    
+    <!-- Hero Stats Row -->
+    <section class="stats-grid">
+      <div class="card stat-card gold-card">
+        <div class="stat-icon-wrapper gold-glow">💰</div>
+        <div class="stat-info">
+          <span class="stat-label">Gold Looted</span>
+          <span id="stat-gold" class="stat-value">0</span>
+        </div>
+      </div>
+
+      <div class="card stat-card elixir-card">
+        <div class="stat-icon-wrapper elixir-glow">🧪</div>
+        <div class="stat-info">
+          <span class="stat-label">Elixir Looted</span>
+          <span id="stat-elixir" class="stat-value">0</span>
+        </div>
+      </div>
+
+      <div class="card stat-card dark-card">
+        <div class="stat-icon-wrapper dark-glow">💧</div>
+        <div class="stat-info">
+          <span class="stat-label">Dark Elixir Looted</span>
+          <span id="stat-dark" class="stat-value">0</span>
+        </div>
+      </div>
+
+      <div class="card stat-card wall-card">
+        <div class="stat-icon-wrapper wall-glow">🧱</div>
+        <div class="stat-info">
+          <span class="stat-label">Walls Upgraded</span>
+          <span id="stat-walls" class="stat-value">0</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Workspace Split View -->
+    <div class="workspace-grid">
+      
+      <!-- Left Column: Live Screen & Viewport -->
+      <section class="card viewport-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon">📺</span> Live Device Feed
+          </div>
+          <div class="live-action-indicator">
+            <span class="action-pulse"></span>
+            <span id="current-action-label">Ready</span>
+          </div>
+        </div>
+
+        <div class="screen-wrapper">
+          <img id="live-screen-img" src="/api/frame" alt="Clash of Clans Live Viewport" />
+          <div class="screen-overlay" id="screen-overlay">
+            <span id="overlay-status-pill">State: Synchronizing...</span>
+          </div>
+        </div>
+
+        <div class="quick-manual-controls">
+          <button id="btn-force-walls" class="btn btn-outline" onclick="triggerWallUpgrade()">
+            🧱 Upgrade Walls Now
+          </button>
+          <button id="btn-force-train" class="btn btn-outline" onclick="triggerTrainArmy()">
+            ⚔️ Train Army Now
+          </button>
+          <button id="btn-refresh-feed" class="btn btn-outline" onclick="refreshFrame()">
+            🔄 Refresh Frame
+          </button>
+        </div>
+      </section>
+
+      <!-- Right Column: Strategy Controls & Live Log -->
+      <section class="right-column">
+        
+        <!-- Live Action Terminal -->
+        <article class="card terminal-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">⚡</span> Autonomous Activity Log
+            </div>
+            <span class="terminal-badge">LIVE STREAM</span>
+          </div>
+          <div class="terminal-container" id="terminal-logs">
+            <div class="log-entry system">[SYSTEM] AutoFarm engine initialized. Awaiting commands...</div>
+          </div>
+        </article>
+
+        <!-- Strategy & Threshold Configuration -->
+        <article class="card config-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">🎯</span> Smart Strategy & Thresholds
+            </div>
+          </div>
+
+          <form id="config-form" class="config-grid" onsubmit="event.preventDefault(); saveConfig();">
+            <div class="input-group">
+              <label for="input-min-gold">Min Gold per Base</label>
+              <div class="input-wrapper">
+                <input type="number" id="input-min-gold" step="50000" min="50000" max="2000000" value="450000">
+                <span class="unit">Gold</span>
+              </div>
+            </div>
+
+            <div class="input-group">
+              <label for="input-min-elixir">Min Elixir per Base</label>
+              <div class="input-wrapper">
+                <input type="number" id="input-min-elixir" step="50000" min="50000" max="2000000" value="450000">
+                <span class="unit">Elixir</span>
+              </div>
+            </div>
+
+            <div class="input-group">
+              <label for="input-min-de">Min Dark Elixir</label>
+              <div class="input-wrapper">
+                <input type="number" id="input-min-de" step="500" min="500" max="20000" value="3500">
+                <span class="unit">DE</span>
+              </div>
+            </div>
+
+            <div class="input-group">
+              <label for="input-reserve-gold">Wall Gold Reserve (Keep Safe)</label>
+              <div class="input-wrapper">
+                <input type="number" id="input-reserve-gold" step="500000" min="500000" max="10000000" value="1500000">
+                <span class="unit">Gold</span>
+              </div>
+            </div>
+
+            <div class="input-group">
+              <label for="select-strategy">Attack Methodology</label>
+              <select id="select-strategy" class="custom-select">
+                <option value="collector_snipe" selected>Smart Collector Snipe (Sneaky Goblins)</option>
+                <option value="barch_wave">Perimeter Barch Wave</option>
+                <option value="full_assault">Full Camp Assault</option>
+              </select>
+            </div>
+
+            <div class="input-group checkbox-group">
+              <label class="toggle-switch">
+                <input type="checkbox" id="check-early-surrender" checked>
+                <span class="toggle-slider"></span>
+              </label>
+              <span class="toggle-label">Early Surrender when 85% Loot Drained (Saves 70% Army)</span>
+            </div>
+
+            <div class="config-submit-bar">
+              <button type="submit" id="btn-save-cfg" class="btn btn-save">
+                Save & Apply Settings
+              </button>
+              <span id="save-status-msg" class="save-msg"></span>
+            </div>
+          </form>
+        </article>
+
+      </section>
+    </div>
+
+    <!-- Bottom Telemetry Banner -->
+    <footer class="telemetry-footer">
+      <div class="telemetry-item">
+        <span class="label">Bases Scanned:</span>
+        <span id="meta-scanned" class="value">0</span>
+      </div>
+      <div class="telemetry-item">
+        <span class="label">Attacks Won:</span>
+        <span id="meta-attacks" class="value">0</span>
+      </div>
+      <div class="telemetry-item">
+        <span class="label">Last Raid Loot:</span>
+        <span id="meta-last-loot" class="value highlight">None</span>
+      </div>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
