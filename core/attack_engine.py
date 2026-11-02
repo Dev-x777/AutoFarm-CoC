@@ -70,10 +70,18 @@ class SmartAttackEngine:
         return False, f"Base skipped: Gold={gold:,}/{self.farming_cfg.min_gold:,}, Elixir={elixir:,}/{self.farming_cfg.min_elixir:,}"
 
     def click_next(self):
-        """Taps the 'Next' button during battle search."""
+        """Taps the 'Next' button during battle search using template matching or calibrated coordinates."""
         self.stats.bases_scanned += 1
-        # Next button is at (1770, 935)
-        self.device.tap(1770, 935)
+        frame = self.device.capture_frame()
+        match = self.vision.match_template(frame, "btn_next")
+        if match:
+            self.device.tap(match[0], match[1])
+        else:
+            # Fallback to calibrated coordinate for CPH2707 (2378x1080) or virtual reference
+            if self.device.device_width >= 2200:
+                self.device.tap(2107, 741)
+            else:
+                self.device.tap(1770, 935)
 
     def execute_smart_attack(self) -> Dict[str, int]:
         """
@@ -94,18 +102,25 @@ class SmartAttackEngine:
         deploy_points = [self.vision.find_safe_deploy_point(c) for c in collectors]
         self.log(f"Located {len(deploy_points)} outer collector targets with safe drop points.")
 
-        # 2. Select Troop Slot 1 (e.g. Sneaky Goblins at ~415, 1000)
-        self.device.tap(415, 1000)
+        # 2. Select Troop Slot 1 (Sneaky Goblins)
+        slot_match = self.vision.match_template(frame, "slot_sneaky_goblin")
+        if slot_match:
+            self.device.tap(slot_match[0], slot_match[1])
+        else:
+            if self.device.device_width >= 2200:
+                self.device.tap(380, 980)  # CPH2707 Slot 1 center
+            else:
+                self.device.tap(415, 1000)
         time.sleep(0.3)
 
-        # 3. Wave 1: Deploy 2 troops per collector
+        # 3. Wave 1: Deploy 2-3 troops per collector outside the red boundary
         troops_per_target = max(1, self.attack_cfg.troops_per_collector)
-        self.log(f"Deploying Wave 1: {troops_per_target} troops per target...")
+        self.log(f"Deploying Wave 1: {troops_per_target} Sneaky Goblins per outer collector target...")
         for pt in deploy_points:
             for _ in range(troops_per_target):
                 self.device.tap(pt[0], pt[1])
                 time.sleep(0.12)
-            time.sleep(0.2)
+            time.sleep(0.25)
 
         # 4. Monitor loot drain in real time
         start_time = time.time()
@@ -114,6 +129,7 @@ class SmartAttackEngine:
         total_available = max(1, prev_remaining)
 
         self.log("Monitoring loot depletion and battle progress...")
+        cur_loot = initial_loot
         while time.time() - start_time < self.attack_cfg.max_attack_duration_seconds:
             time.sleep(2.0)
             cur_frame = self.device.capture_frame()
@@ -172,12 +188,26 @@ class SmartAttackEngine:
 
     def end_battle(self):
         """Clicks 'End Battle' button and confirms surrender popup."""
-        # End Battle button is at bottom-left: (145, 935)
-        self.device.tap(145, 935)
+        frame = self.device.capture_frame()
+        match = self.vision.match_template(frame, "btn_end_battle")
+        if match:
+            self.device.tap(match[0], match[1])
+        else:
+            if self.device.device_width >= 2200:
+                self.device.tap(239, 790)  # CPH2707 End Battle button
+            else:
+                self.device.tap(145, 935)
         time.sleep(0.8)
-        # Confirm popup "Okay" button at center: (1080, 650)
-        self.device.tap(1080, 650)
+
+        # Confirm popup "Okay" button at center:
+        # Standard Supercell surrender dialog "Okay" is slightly right of center
+        cx = int(self.device.device_width * 0.56)
+        cy = int(self.device.device_height * 0.60)
+        self.device.tap(cx, cy)
         time.sleep(1.5)
-        # Return Home button on battle end screen: (960, 920)
-        self.device.tap(960, 920)
-        time.sleep(1.5)
+
+        # Return Home button on battle end screen: bottom center
+        rx = int(self.device.device_width * 0.50)
+        ry = int(self.device.device_height * 0.88)
+        self.device.tap(rx, ry)
+        time.sleep(1.8)

@@ -95,9 +95,9 @@ class Humanizer:
     """Generates human-like touch inputs using Bézier curves and Gaussian distributions."""
 
     @staticmethod
-    def jitter_point(x: int, y: int, max_radius: int = 5) -> Tuple[int, int]:
-        """Adds natural hand tremor / finger placement variance."""
-        radius = random.gauss(0, max_radius / 2.0)
+    def jitter_point(x: int, y: int, max_radius: int = 8) -> Tuple[int, int]:
+        """Adds natural hand tremor / finger placement variance using 2D Gaussian distribution."""
+        radius = abs(random.gauss(0, max_radius / 2.0))
         angle = random.uniform(0, 2 * math.pi)
         jx = int(round(x + radius * math.cos(angle)))
         jy = int(round(y + radius * math.sin(angle)))
@@ -140,6 +140,16 @@ class Humanizer:
     def random_sleep(min_sec: float = 0.35, max_sec: float = 0.95):
         """Simulates human reaction time."""
         delay = random.uniform(min_sec, max_sec)
+        time.sleep(delay)
+
+    @staticmethod
+    def reaction_delay(min_sec: float = 0.30, max_sec: float = 0.75):
+        """Simulates human reaction time using log-normal distribution with micro-pauses."""
+        base = random.lognormvariate(-0.8, 0.3)
+        delay = max(min_sec, min(max_sec, base))
+        # 8% chance of natural human micro-distraction pause
+        if random.random() < 0.08:
+            delay += random.uniform(1.0, 2.2)
         time.sleep(delay)
 
 
@@ -470,17 +480,19 @@ class DeviceController:
         sy = int(y * (self.device_height / float(self.target_height)))
         return sx, sy
 
-    def tap(self, x: int, y: int):
-        """Sends a humanized jittered tap."""
-        jx, jy = Humanizer.jitter_point(x, y)
+    def tap(self, x: int, y: int, press_duration_ms: Optional[int] = None):
+        """Sends a humanized jittered tap with realistic touch duration."""
+        jx, jy = Humanizer.jitter_point(x, y, max_radius=8)
         if self.mode == "mock":
             self.mock.tap(jx, jy)
             Humanizer.random_sleep(0.1, 0.25)
             return
 
         rx, ry = self._scale_coords(jx, jy)
-        self._run_adb(["shell", "input", "tap", str(rx), str(ry)])
-        Humanizer.random_sleep(0.15, 0.35)
+        # Real human finger contact lasts 65ms to 125ms
+        dur = press_duration_ms or random.randint(65, 125)
+        self._run_adb(["shell", "input", "swipe", str(rx), str(ry), str(rx), str(ry), str(dur)])
+        Humanizer.reaction_delay(0.15, 0.35)
 
     def tap_hold(self, x: int, y: int, duration_ms: int = 500):
         """Holds a position (useful for continuous troop deployment)."""

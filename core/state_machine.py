@@ -169,7 +169,37 @@ class BotEngine:
                         time.sleep(1.5)
                     continue
 
-                # 5. Home Screen: Full Routine
+                # 5. Attack Selection Menu (Multiplayer / Single player)
+                if state == GameState.ATTACK_MENU:
+                    self.current_action = "Selecting Multiplayer"
+                    self.log("Attack menu open. Tapping 'Find a Match'...")
+                    btn_find = self.vision.match_template(frame, "btn_find_match")
+                    if btn_find:
+                        self.device.tap(btn_find[0], btn_find[1])
+                    else:
+                        if self.device.device_width >= 2200:
+                            self.device.tap(431, 793)
+                        else:
+                            self.device.tap(1420, 750)
+                    time.sleep(1.8)
+                    continue
+
+                # 6. Army Confirmation Screen ("My Army" overview before battle search)
+                if state == GameState.ARMY_CONFIRMATION:
+                    self.current_action = "Confirming Army & Initiating Matchmaking"
+                    self.log("Army screen verified. Tapping Battle to search base...")
+                    btn_army = self.vision.match_template(frame, "btn_army_battle")
+                    if btn_army:
+                        self.device.tap(btn_army[0], btn_army[1])
+                    else:
+                        if self.device.device_width >= 2200:
+                            self.device.tap(1947, 976)
+                        else:
+                            self.device.tap(1420, 750)
+                    time.sleep(2.5)
+                    continue
+
+                # 7. Home Screen: Full Routine
                 if state in (GameState.HOME, GameState.WALL_SELECTED):
                     self.current_action = "Base Management"
                     # Step A: Harvest internal collectors
@@ -187,12 +217,15 @@ class BotEngine:
                     # Step D: Initiate Attack Search
                     self.current_action = "Initiating Attack Search"
                     self.log("Initiating search for multiplayer target...")
-                    # Tap Attack button at (120, 960)
-                    self.device.tap(120, 960)
-                    time.sleep(1.2)
-                    # Tap "Find a Match" (Right button: 1420, 750)
-                    self.device.tap(1420, 750)
-                    time.sleep(2.0)
+                    btn_home = self.vision.match_template(frame, "btn_battle")
+                    if btn_home:
+                        self.device.tap(btn_home[0], btn_home[1])
+                    else:
+                        if self.device.device_width >= 2200:
+                            self.device.tap(228, 960)
+                        else:
+                            self.device.tap(120, 960)
+                    time.sleep(1.5)
                     continue
 
                 # Unknown state: tap screen center to clear random popovers

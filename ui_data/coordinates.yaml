@@ -21,3 +21,67 @@ home_screen:
     dark_elixir:
       icon_center: [2220, 207]
       text_bbox: [1870, 175, 2170, 235]
+
+attack_menu:
+  find_match_button:
+    bbox: [214, 736, 648, 850] # [x1, y1, x2, y2]
+    center: [431, 793]
+    template: "ui_data/templates/btn_find_match.png"
+  
+  edit_army_button:
+    bbox: [188, 987, 470, 1030]
+    center: [329, 1008]
+    template: "ui_data/templates/btn_edit_army.png"
+
+army_screen:
+  battle_button:
+    bbox: [1757, 934, 2137, 1018]
+    center: [1947, 976]
+    template: "ui_data/templates/btn_army_battle.png"
+
+  close_button:
+    bbox: [2076, 55, 2144, 117]
+    center: [2110, 86]
+    template: "ui_data/templates/btn_army_close.png"
+
+  army_capacity:
+    text_bbox: [1050, 205, 1220, 245]
+
+battle_search:
+  next_button:
+    bbox: [1955, 683, 2260, 800] # [x1, y1, x2, y2]
+    center: [2107, 741]
+    template: "ui_data/templates/btn_next.png"
+
+  end_battle_button:
+    bbox: [130, 756, 349, 824]
+    center: [239, 790]
+    template: "ui_data/templates/btn_end_battle.png"
+
+  available_loot:
+    gold:
+      icon_center: [160, 155]
+      text_bbox: [210, 130, 450, 185]
+    elixir:
+      icon_center: [160, 225]
+      text_bbox: [210, 200, 450, 255]
+    dark_elixir:
+      icon_center: [160, 295]
+      text_bbox: [210, 270, 450, 325]
+
+  troop_tray:
+    slot_1: # Sneaky Goblins
+      bbox: [305, 890, 455, 1070]
+      center: [380, 980]
+      template: "ui_data/templates/slot_sneaky_goblin.png"
+    slot_2: # Siege
+      center: [555, 980]
+    slot_3: # King
+      center: [715, 980]
+    slot_4: # Jump Spell
+      center: [895, 980]
+    slot_5: # Invis Spell
+      center: [1055, 980]
+
+
+
