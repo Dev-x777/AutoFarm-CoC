@@ -297,6 +297,26 @@ async function toggleDetectionBoxes() {
   }
 }
 
+// Force Connected Android Device into Landscape orientation via ADB
+async function forceLandscape() {
+  const btn = document.getElementById("btn-force-landscape");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/device/force_landscape", { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+      refreshFrame();
+      fetchStatus();
+    } else {
+      alert("Could not force landscape: " + (data.error || "Device not connected. Connect phone via ADB."));
+    }
+  } catch (err) {
+    alert("Force landscape request failed: " + err);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // Toggle Autonomous Attacks & Touch Inputs
 async function toggleAutomationMode() {
   const currentText = document.getElementById("btn-toggle-auto")?.textContent || "";

@@ -105,6 +105,22 @@ def create_app(bot_engine: BotEngine) -> FastAPI:
             "touch_enabled": getattr(bot_engine.device, "touch_enabled", False),
         }
 
+    @app.post("/api/device/force_landscape")
+    def force_landscape():
+        """Forces the connected Android phone into Landscape orientation via ADB WindowManager."""
+        if hasattr(bot_engine.device, "force_landscape_orientation"):
+            success = bot_engine.device.force_landscape_orientation()
+            return {"success": success}
+        return {"success": False, "error": "Not supported on current device"}
+
+    @app.post("/api/device/reset_orientation")
+    def reset_orientation():
+        """Unlocks screen orientation back to normal system auto-rotation."""
+        if hasattr(bot_engine.device, "reset_orientation"):
+            success = bot_engine.device.reset_orientation()
+            return {"success": success}
+        return {"success": False, "error": "Not supported on current device"}
+
     @app.get("/api/frame")
     def get_frame():
         """Returns the current screen with or without HUD bounding box overlay."""

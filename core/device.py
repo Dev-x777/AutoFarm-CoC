@@ -705,6 +705,42 @@ class DeviceController:
         else:
             print("[Device Safety Shield] Clash of Clans is NOT in foreground. AutoFarm is holding touch actions safely.")
 
+    def force_landscape_orientation(self) -> bool:
+        """Forces the connected Android phone into Landscape mode using ADB WindowManager settings."""
+        if self.mode != "adb" or not self.adb_bin:
+            return False
+        try:
+            # 1. Turn off accelerometer auto-rotation
+            self._run_adb(["shell", "settings", "put", "system", "accelerometer_rotation", "0"])
+            # 2. Lock user rotation to Landscape (1 = 90° clockwise)
+            self._run_adb(["shell", "settings", "put", "system", "user_rotation", "1"])
+            self._run_adb(["shell", "wm", "user-rotation", "lock", "1"])
+            # 3. Invalidate current frame so it immediately refreshes in landscape
+            with self._frame_lock:
+                self._current_frame = None
+                self._latest_jpeg_bytes = None
+            print("[Device] Successfully locked device into Landscape orientation via ADB.")
+            return True
+        except Exception as e:
+            print(f"[Device] Failed to force landscape: {e}")
+            return False
+
+    def reset_orientation(self) -> bool:
+        """Unlocks screen rotation so Android can naturally rotate again."""
+        if self.mode != "adb" or not self.adb_bin:
+            return False
+        try:
+            self._run_adb(["shell", "wm", "user-rotation", "free"])
+            self._run_adb(["shell", "settings", "put", "system", "accelerometer_rotation", "1"])
+            with self._frame_lock:
+                self._current_frame = None
+                self._latest_jpeg_bytes = None
+            print("[Device] Screen rotation unlocked to system defaults.")
+            return True
+        except Exception as e:
+            print(f"[Device] Failed to reset orientation: {e}")
+            return False
+
     def _fetch_frame_now(self) -> Optional[np.ndarray]:
         """Low-level hardware screencap with fast raw-framebuffer acceleration."""
         if self.mode == "mock":
@@ -835,15 +871,6 @@ class DeviceController:
                 print(f"[Device Safety Guard] CRITICAL: Tap at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
                 return
 
-        if self.mode != "mock":
-            if not self.touch_enabled:
-                print(f"[Device Safety Guard] Touch inputs disabled. Tap at ({x}, {y}) skipped.")
-                return
-
-            if not self.is_game_foreground():
-                print(f"[Device Safety Guard] CRITICAL: Tap at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
-                return
-
         jx, jy = Humanizer.jitter_point(x, y, max_radius=8)
         if self.mode == "mock":
             self.mock.tap(jx, jy)
@@ -870,15 +897,6 @@ class DeviceController:
                 print(f"[Device Safety Guard] CRITICAL: Hold at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
                 return
 
-        if self.mode != "mock":
-            if not self.touch_enabled:
-                print(f"[Device Safety Guard] Touch inputs disabled. Hold at ({x}, {y}) skipped.")
-                return
-
-            if not self.is_game_foreground():
-                print(f"[Device Safety Guard] CRITICAL: Hold at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
-                return
-
         jx, jy = Humanizer.jitter_point(x, y)
         if self.mode == "mock":
             self.mock.tap(jx, jy)
@@ -888,15 +906,6 @@ class DeviceController:
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 400):
         """Executes a curved Bézier swipe mimicking human hand motion."""
-        if self.mode != "mock":
-            if not self.touch_enabled:
-                print(f"[Device Safety Guard] Touch inputs disabled. Swipe skipped.")
-                return
-
-            if not self.is_game_foreground():
-                print(f"[Device Safety Guard] CRITICAL: Swipe BLOCKED! Clash of Clans is NOT in foreground.")
-                return
-
         if self.mode != "mock":
             if not self.touch_enabled:
                 print(f"[Device Safety Guard] Touch inputs disabled. Swipe skipped.")
