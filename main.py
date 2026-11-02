@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--host", default=None, help="Dashboard host IP")
     parser.add_argument("--port", type=int, default=None, help="Dashboard port")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open web browser")
+    parser.add_argument("--autostart", action="store_true", help="Automatically start farming cycle immediately")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -55,6 +56,10 @@ def main():
         app = create_app(bot)
         dashboard_url = f"http://{host}:{port}"
         print(f"\n🚀 Web Dashboard running at: {dashboard_url}")
+
+        if args.autostart:
+            print("\n[AutoFarm] Auto-starting farming cycle on connected device...")
+            bot.start()
 
         if cfg.dashboard.open_browser and not args.no_browser:
             try:

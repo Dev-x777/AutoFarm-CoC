@@ -19,6 +19,7 @@ class DeviceConfig(BaseModel):
 
 
 class FarmingConfig(BaseModel):
+    battle_mode: Literal["regular", "ranked", "builder_base"] = "regular"
     min_gold: int = 450000
     min_elixir: int = 450000
     min_dark_elixir: int = 3500
@@ -33,6 +34,8 @@ class AttackConfig(BaseModel):
     strategy: Literal["collector_snipe", "barch_wave", "full_assault"] = "collector_snipe"
     preferred_troop: Literal["sneaky_goblin", "barch", "baby_dragon"] = "sneaky_goblin"
     troops_per_collector: int = 3
+    tap_cadence_min: float = 0.12
+    tap_cadence_max: float = 0.26
     early_surrender: bool = True
     loot_depletion_threshold: float = 0.85
     stagnant_seconds: int = 7
@@ -52,6 +55,7 @@ class WallsConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     auto_train: bool = True
+    instant_training: bool = True
     quick_train_slot: int = 1
     min_army_capacity_pct: int = 85
 

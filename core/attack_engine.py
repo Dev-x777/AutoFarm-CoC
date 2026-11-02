@@ -8,6 +8,7 @@ Implements:
 5. League Trophy Range Maintenance.
 """
 
+import random
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -119,8 +120,13 @@ class SmartAttackEngine:
         for pt in deploy_points:
             for _ in range(troops_per_target):
                 self.device.tap(pt[0], pt[1])
-                time.sleep(0.12)
-            time.sleep(0.25)
+                # Controlled tap cadence (120ms-260ms) from clash-of-clans-play skill
+                cadence = random.uniform(
+                    getattr(self.attack_cfg, "tap_cadence_min", 0.12),
+                    getattr(self.attack_cfg, "tap_cadence_max", 0.26)
+                )
+                time.sleep(cadence)
+            time.sleep(0.2)
 
         # 4. Monitor loot drain in real time
         start_time = time.time()

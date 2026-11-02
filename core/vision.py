@@ -10,6 +10,7 @@ Handles:
 import math
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -118,26 +119,30 @@ class VisionEngine:
 
     def __init__(self):
         self._templates: Dict[str, np.ndarray] = {}
+        self.cached_entities: List[Dict] = []
+        self.cached_state: str = "unknown"
+        self._cached_lock = threading.Lock()
         self._load_templates()
 
+    def update_cached_detections(self, entities: List[Dict], state: str):
+        """Thread-safe update of the latest perception output."""
+        with self._cached_lock:
+            self.cached_entities = entities
+            self.cached_state = state
+
+    def get_cached_detections(self) -> Tuple[List[Dict], str]:
+        """Returns the latest precomputed entities and state in sub-millisecond time."""
+        with self._cached_lock:
+            return list(self.cached_entities), self.cached_state
+
     def _load_templates(self):
-        """Pre-loads UI button templates from ui_data/templates."""
+        """Pre-loads all UI button and icon templates from ui_data/templates."""
         if not TEMPLATES_DIR.is_dir():
             return
-        template_files = {
-            "btn_battle": "btn_battle.png",
-            "btn_find_match": "btn_find_match.png",
-            "btn_army_battle": "btn_army_battle.png",
-            "btn_next": "btn_next.png",
-            "btn_end_battle": "btn_end_battle.png",
-            "slot_sneaky_goblin": "slot_sneaky_goblin.png",
-        }
-        for name, fname in template_files.items():
-            p = TEMPLATES_DIR / fname
-            if p.is_file():
-                img = cv2.imread(str(p))
-                if img is not None:
-                    self._templates[name] = img
+        for p in TEMPLATES_DIR.glob("*.png"):
+            img = cv2.imread(str(p))
+            if img is not None:
+                self._templates[p.stem] = img
 
     def match_template(
         self, frame: np.ndarray, template_name: str, min_score: float = 0.82, roi: Optional[Tuple[int, int, int, int]] = None
@@ -221,15 +226,22 @@ class VisionEngine:
 
         # Reload / Disconnect modal
         center_crop = frame[int(h * 0.35) : int(h * 0.65), int(w * 0.3) : int(w * 0.7)]
-        if self._has_reload_button(center_crop):
+        if self._has_reload_button(center_crop, frame):
             return GameState.RELOAD_POPUP
 
         return GameState.UNKNOWN
 
-    def _has_reload_button(self, roi: np.ndarray) -> bool:
+    def _has_reload_button(self, roi: np.ndarray, frame: Optional[np.ndarray] = None) -> bool:
         """Detects green 'Reload Game' button inside a dark dialog modal."""
         if roi is None or roi.size == 0:
             return False
+        # If top-right resource bar is present, this is active game HUD, not a reload modal
+        if frame is not None and frame.size > 0:
+            h_f, w_f = frame.shape[:2]
+            top_right = frame[20:100, int(w_f * 0.8) : w_f]
+            if top_right.mean() > 70:
+                return False
+
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array([35, 100, 100]), np.array([85, 255, 255]))
         return cv2.countNonZero(mask) > 1500
@@ -399,3 +411,904 @@ class VisionEngine:
             return tx, max(160, ry1 - 40)
         else:
             return tx, min(900, ry2 + 40)
+
+    def match_template_detailed(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        min_score: float = 0.75,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Optional[Dict]:
+        """Returns detailed bounding box and score dictionary if matched."""
+        tmpl = self._templates.get(template_name)
+        if tmpl is None or frame is None or frame.size == 0:
+            return None
+
+        search_area = frame
+        ox, oy = 0, 0
+        if roi is not None:
+            x1, y1, x2, y2 = roi
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+            if x2 > x1 and y2 > y1:
+                search_area = frame[y1:y2, x1:x2]
+                ox, oy = x1, y1
+
+        th, tw = tmpl.shape[:2]
+        sh, sw = search_area.shape[:2]
+        if sh < th or sw < tw:
+            return None
+
+        res = cv2.matchTemplate(search_area, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        if max_val >= min_score:
+            x = ox + max_loc[0]
+            y = oy + max_loc[1]
+            cx = x + tw // 2
+            cy = y + th // 2
+            return {
+                "id": template_name,
+                "bbox": [int(x), int(y), int(tw), int(th)],
+                "center": [int(cx), int(cy)],
+                "confidence": round(float(max_val), 3),
+            }
+        return None
+
+    def detect_all_entities(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Scans current screen and returns all recognized UI elements, buttons,
+        resource bars, text, and base structures with bounding boxes.
+        """
+        if frame is None or frame.size == 0:
+            return []
+
+        h, w = frame.shape[:2]
+        entities: List[Dict] = []
+        state = self.detect_state(frame)
+
+        # 1. Match registered templates
+        friendly_names = {
+            "btn_battle": ("Attack / Battle Button", (0, 255, 128), "button"),
+            "btn_find_match": ("Find a Match Button", (0, 200, 255), "button"),
+            "btn_army_battle": ("Attack! (Army Screen)", (0, 255, 100), "button"),
+            "btn_train_army": ("Train Army / Troops", (255, 180, 50), "button"),
+            "btn_shop": ("Shop Menu Button", (0, 180, 255), "button"),
+            "hud_profile": ("Player Profile & XP", (220, 220, 220), "hud"),
+            "btn_next": ("Next Match Button", (0, 165, 255), "button"),
+            "btn_end_battle": ("End Battle Button", (0, 0, 255), "button"),
+            "btn_edit_army": ("Edit Army / Quick Train", (255, 180, 50), "button"),
+            "btn_army_close": ("Close Army Menu", (180, 180, 180), "button"),
+            "slot_sneaky_goblin": ("Sneaky Goblin Slot", (50, 220, 50), "troop"),
+            "icon_sword": ("Battle Swords Icon", (0, 220, 220), "icon"),
+        }
+
+        for tmpl_id, (label, color, category) in friendly_names.items():
+            match = self.match_template_detailed(frame, tmpl_id, min_score=0.75)
+            if match:
+                match["label"] = label
+                match["color"] = color
+                match["category"] = category
+                entities.append(match)
+
+        # 2. Detect Top-Right Home Resource Bars (Gold, Elixir, DE, Gems, Builders)
+        if state in (GameState.HOME, GameState.WALL_SELECTED):
+            if w >= 2200:
+                gold_box = [1860, 25, 330, 68]
+                elixir_box = [1860, 100, 330, 68]
+                de_box = [1860, 175, 330, 68]
+                gems_box = [1950, 245, 240, 68]
+                builders_box = [1050, 20, 250, 60]
+            else:
+                gold_box = [1560, 35, 300, 50]
+                elixir_box = [1560, 90, 300, 50]
+                de_box = [1560, 145, 300, 50]
+                gems_box = [1650, 200, 210, 50]
+                builders_box = [880, 20, 200, 50]
+
+            try:
+                g_crop = frame[gold_box[1] : gold_box[1] + gold_box[3], gold_box[0] : gold_box[0] + gold_box[2]]
+                e_crop = frame[elixir_box[1] : elixir_box[1] + elixir_box[3], elixir_box[0] : elixir_box[0] + elixir_box[2]]
+                de_crop = frame[de_box[1] : de_box[1] + de_box[3], de_box[0] : de_box[0] + de_box[2]]
+                gems_crop = frame[gems_box[1] : gems_box[1] + gems_box[3], gems_box[0] : gems_box[0] + gems_box[2]]
+
+                g_val = DigitOCR.extract_number_from_roi(g_crop)
+                e_val = DigitOCR.extract_number_from_roi(e_crop)
+                de_val = DigitOCR.extract_number_from_roi(de_crop)
+                gems_val = DigitOCR.extract_number_from_roi(gems_crop)
+
+                if g_val > 0 or e_val > 0:
+                    entities.append({
+                        "id": "gold_balance",
+                        "label": f"Gold: {g_val:,}",
+                        "category": "resource",
+                        "bbox": gold_box,
+                        "color": (0, 215, 255),
+                        "confidence": 0.98,
+                    })
+                    entities.append({
+                        "id": "elixir_balance",
+                        "label": f"Elixir: {e_val:,}",
+                        "category": "resource",
+                        "bbox": elixir_box,
+                        "color": (220, 50, 220),
+                        "confidence": 0.98,
+                    })
+                    if de_val > 0:
+                        entities.append({
+                            "id": "de_balance",
+                            "label": f"Dark Elixir: {de_val:,}",
+                            "category": "resource",
+                            "bbox": de_box,
+                            "color": (255, 200, 50),
+                            "confidence": 0.95,
+                        })
+                    if gems_val > 0:
+                        entities.append({
+                            "id": "gems_balance",
+                            "label": f"Gems: {gems_val:,}",
+                            "category": "resource",
+                            "bbox": gems_box,
+                            "color": (50, 255, 50),
+                            "confidence": 0.95,
+                        })
+                    entities.append({
+                        "id": "builders_hud",
+                        "label": "Builders Bar",
+                        "category": "hud",
+                        "bbox": builders_box,
+                        "color": (0, 160, 255),
+                        "confidence": 0.90,
+                    })
+            except Exception:
+                pass
+
+        # 3. Detect Battle Loot HUD (Top-Left during matchmaking / battle)
+        if state in (GameState.BATTLE_SEARCH, GameState.IN_BATTLE):
+            loot = self.read_battle_loot(frame)
+            if loot.get("gold", 0) > 0 or loot.get("elixir", 0) > 0:
+                loot_box = [120, 100, 360, 170] if w >= 2200 else [60, 50, 340, 160]
+                entities.append({
+                    "id": "available_loot",
+                    "label": f"Available: G:{loot['gold']:,} | E:{loot['elixir']:,}",
+                    "category": "loot",
+                    "bbox": loot_box,
+                    "color": (0, 215, 255),
+                    "confidence": 0.96,
+                })
+
+        # 4. Detect Outer Collectors
+        if state in (GameState.BATTLE_SEARCH, GameState.IN_BATTLE):
+            collectors = self.locate_outer_collectors(frame)
+            for i, (cx, cy) in enumerate(collectors[:8]):
+                entities.append({
+                    "id": f"collector_{i+1}",
+                    "label": f"Target Collector #{i+1}",
+                    "category": "target",
+                    "bbox": [cx - 32, cy - 32, 64, 64],
+                    "color": (0, 255, 255),
+                    "confidence": 0.88,
+                })
+
+        # 5. Detect Village Structures & 3D wireframe skeletons (Home Village)
+        if state in (GameState.HOME, GameState.WALL_SELECTED) or (w >= 1800 and state == GameState.UNKNOWN):
+            structures = self.detect_village_structures(frame)
+            entities.extend(structures)
+
+        return entities
+
+    def detect_village_structures(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Segments the village playable field, detects buildings, defenses,
+        storages, Town Hall, and generates 3D isometric wireframe skeletons.
+        """
+        if frame is None or frame.size == 0:
+            return []
+        h, w = frame.shape[:2]
+        if w < 1200 or h < 600:
+            return []
+
+        cx, cy = w // 2, int(h * 0.50)
+        diamond_pts = np.array([
+            [cx, int(h * 0.12)],
+            [int(w * 0.86), cy],
+            [cx, int(h * 0.88)],
+            [int(w * 0.14), cy]
+        ], dtype=np.int32)
+
+        field_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(field_mask, [diamond_pts], 255)
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        grass_mask = cv2.inRange(hsv, (35, 35, 35), (85, 255, 210))
+        structures_mask = cv2.bitwise_and(cv2.bitwise_not(grass_mask), field_mask)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        cleaned = cv2.morphologyEx(structures_mask, cv2.MORPH_OPEN, kernel)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        structures = []
+
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 380 or area > 55000:
+                continue
+            x, y, bw, bh = cv2.boundingRect(c)
+            aspect = bw / float(bh)
+            if aspect < 0.4 or aspect > 2.5:
+                continue
+
+            crop_hsv = hsv[y : y + bh, x : x + bw]
+            yellow_ratio = np.mean(cv2.inRange(crop_hsv, (15, 75, 75), (35, 255, 255)) > 0)
+            purple_ratio = np.mean(cv2.inRange(crop_hsv, (135, 55, 55), (175, 255, 255)) > 0)
+            dark_ratio = np.mean(crop_hsv[:, :, 2] < 50)
+
+            scx, scy = x + bw // 2, y + bh // 2
+            dist_to_center = math.hypot(scx - cx, scy - cy)
+
+            if dist_to_center < 180 and area > 4500:
+                label = "Town Hall (Village Core)"
+                cat = "townhall"
+                color = (0, 235, 255)
+                conf = 0.96
+            elif yellow_ratio > 0.11:
+                label = "Gold Storage / Mine"
+                cat = "resource"
+                color = (0, 215, 255)
+                conf = 0.92
+            elif purple_ratio > 0.07:
+                label = "Elixir Storage / Collector"
+                cat = "resource"
+                color = (220, 50, 220)
+                conf = 0.92
+            elif dark_ratio > 0.25 and area > 1000:
+                label = "Dark Elixir Drill / Storage"
+                cat = "resource"
+                color = (255, 180, 50)
+                conf = 0.89
+            elif area > 1200:
+                label = "Defense / Structure"
+                cat = "defense"
+                color = (0, 165, 255)
+                conf = 0.88
+            else:
+                label = "Village Structure"
+                cat = "structure"
+                color = (180, 220, 0)
+                conf = 0.82
+
+            structures.append({
+                "id": f"structure_{len(structures) + 1}",
+                "label": label,
+                "category": cat,
+                "bbox": [x, y, bw, bh],
+                "color": color,
+                "confidence": conf,
+                "is_skeleton": True,
+            })
+
+        return structures
+
+    @staticmethod
+    def draw_village_grid_skeleton(canvas: np.ndarray):
+        """Renders the 44x44 isometric village field boundary and quadrant axes."""
+        h, w = canvas.shape[:2]
+        if w < 1200:
+            return
+        cx, cy = w // 2, int(h * 0.50)
+        field_pts = np.array([
+            [cx, int(h * 0.12)],
+            [int(w * 0.86), cy],
+            [cx, int(h * 0.88)],
+            [int(w * 0.14), cy]
+        ], dtype=np.int32)
+
+        # Outer perimeter diamond
+        cv2.polylines(canvas, [field_pts], True, (0, 220, 160), 2, cv2.LINE_AA)
+
+        # Inner concentric isometric grid rings
+        center = np.array([cx, cy], dtype=np.float32)
+        for frac in (0.33, 0.66):
+            sub_pts = (center + (field_pts - center) * frac).astype(np.int32)
+            cv2.polylines(canvas, [sub_pts], True, (0, 130, 90), 1, cv2.LINE_AA)
+
+        # Quadrant axes
+        cv2.line(canvas, (cx, int(h * 0.12)), (cx, int(h * 0.88)), (0, 160, 110), 1, cv2.LINE_AA)
+        cv2.line(canvas, (int(w * 0.14), cy), (int(w * 0.86), cy), (0, 160, 110), 1, cv2.LINE_AA)
+
+        # Center Village Core crosshair
+        cv2.drawMarker(canvas, (cx, cy), (0, 255, 200), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+        cv2.putText(canvas, "[VILLAGE GRID 44x44]", (cx - 75, cy + 28), cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 220, 160), 1, cv2.LINE_AA)
+
+    @staticmethod
+    def draw_isometric_skeleton(canvas: np.ndarray, ent: Dict):
+        """Draws a 3D isometric wireframe skeleton around a detected village structure."""
+        bbox = ent.get("bbox")
+        if not bbox or len(bbox) != 4:
+            return
+        x, y, bw, bh = bbox
+        color = ent.get("color", (0, 255, 255))
+        label = ent.get("label", "Structure")
+        conf = ent.get("confidence")
+
+        cx, cy = x + bw // 2, y + bh // 2
+
+        # 1. Base ground diamond footprint
+        h_half = max(8, bh // 3)
+        w_half = max(8, bw // 2)
+        b_top = (cx, cy - h_half)
+        b_right = (cx + w_half, cy)
+        b_bottom = (cx, cy + h_half)
+        b_left = (cx - w_half, cy)
+        base_pts = np.array([b_top, b_right, b_bottom, b_left], dtype=np.int32)
+        cv2.polylines(canvas, [base_pts], True, color, 1, cv2.LINE_AA)
+
+        # 2. Elevated roof diamond
+        elev = int(bh * 0.38)
+        r_top = (b_top[0], b_top[1] - elev)
+        r_right = (b_right[0], b_right[1] - elev)
+        r_bottom = (b_bottom[0], b_bottom[1] - elev)
+        r_left = (b_left[0], b_left[1] - elev)
+        roof_pts = np.array([r_top, r_right, r_bottom, r_left], dtype=np.int32)
+        cv2.polylines(canvas, [roof_pts], True, color, 2, cv2.LINE_AA)
+
+        # 3. Vertical corner pillars
+        cv2.line(canvas, b_top, r_top, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_right, r_right, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_bottom, r_bottom, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_left, r_left, color, 1, cv2.LINE_AA)
+
+        # 4. Roof crosshairs
+        cv2.line(canvas, r_top, r_bottom, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, r_left, r_right, color, 1, cv2.LINE_AA)
+
+        # 5. Tactical skeleton badge
+        badge_text = label + (f" [{conf:.0%}]" if conf is not None else "")
+        (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
+        by = max(4, r_top[1] - th - 6)
+        cv2.rectangle(canvas, (cx - tw // 2 - 4, by), (cx + tw // 2 + 4, by + th + 4), (10, 15, 25), -1)
+        cv2.rectangle(canvas, (cx - tw // 2 - 4, by), (cx + tw // 2 + 4, by + th + 4), color, 1)
+        cv2.putText(canvas, badge_text, (cx - tw // 2, by + th), cv2.FONT_HERSHEY_DUPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+    def draw_detection_overlay(
+        self,
+        frame: np.ndarray,
+        entities: Optional[List[Dict]] = None,
+        inspection_mode: bool = True,
+    ) -> np.ndarray:
+        """
+        Renders HUD bounding boxes, corner brackets, labels, crosshairs,
+        village grid skeletons, and 3D isometric building wireframes onto the frame.
+        Executes in sub-millisecond time by utilizing asynchronous precomputed perception.
+        """
+        if frame is None or frame.size == 0:
+            return frame
+
+        canvas = frame.copy()
+        h, w = canvas.shape[:2]
+
+        if entities is None:
+            entities, state = self.get_cached_detections()
+            if not entities:
+                # Fast single scan fallback
+                state = self.detect_state(frame)
+        else:
+            state = self.detect_state(frame)
+
+        # 1. Draw Village Grid Skeleton on Home or Matchmaking
+        if state in (GameState.HOME, GameState.WALL_SELECTED, GameState.BATTLE_SEARCH, GameState.IN_BATTLE) or state == GameState.UNKNOWN:
+            self.draw_village_grid_skeleton(canvas)
+
+        # 2. Draw entities (3D wireframe skeletons for buildings; HUD brackets for buttons)
+        for ent in entities:
+            if ent.get("is_skeleton"):
+                self.draw_isometric_skeleton(canvas, ent)
+                continue
+
+            bbox = ent.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            x, y, bw, bh = bbox
+            color = ent.get("color", (0, 255, 128))
+            label = ent.get("label", ent.get("id", "Object"))
+            conf = ent.get("confidence")
+
+            # Semi-transparent fill
+            overlay = canvas.copy()
+            cv2.rectangle(overlay, (x, y), (x + bw, y + bh), color, -1)
+            cv2.addWeighted(overlay, 0.15, canvas, 0.85, 0, canvas)
+
+            # Border
+            cv2.rectangle(canvas, (x, y), (x + bw, y + bh), color, 2)
+
+            # Corner brackets (length = 14)
+            L = min(14, max(4, bw // 4), max(4, bh // 4))
+            cv2.line(canvas, (x, y), (x + L, y), color, 3)
+            cv2.line(canvas, (x, y), (x, y + L), color, 3)
+            cv2.line(canvas, (x + bw, y), (x + bw - L, y), color, 3)
+            cv2.line(canvas, (x + bw, y), (x + bw, y + L), color, 3)
+            cv2.line(canvas, (x, y + bh), (x + L, y + bh), color, 3)
+            cv2.line(canvas, (x, y + bh), (x, y + bh - L), color, 3)
+            cv2.line(canvas, (x + bw, y + bh), (x + bw - L, y + bh), color, 3)
+            cv2.line(canvas, (x + bw, y + bh), (x + bw, y + bh - L), color, 3)
+
+            # Center crosshair for tap target
+            cx, cy = x + bw // 2, y + bh // 2
+            cv2.line(canvas, (cx - 5, cy), (cx + 5, cy), color, 2)
+            cv2.line(canvas, (cx, cy - 5), (cx, cy + 5), color, 2)
+
+            # Label badge with dark background for 100% legibility
+            text = label + (f" [{conf:.0%}]" if conf is not None else "")
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+            by = max(4, y - th - 8)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), (15, 23, 42), -1)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), color, 1)
+            cv2.putText(canvas, text, (x + 5, by + th + 2), cv2.FONT_HERSHEY_DUPLEX, 0.55, color, 1, cv2.LINE_AA)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+            by = max(4, y - th - 8)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), (15, 23, 42), -1)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), color, 1)
+            cv2.putText(canvas, text, (x + 5, by + th + 2), cv2.FONT_HERSHEY_DUPLEX, 0.55, color, 1, cv2.LINE_AA)
+
+        # 2. Top Header HUD Banner
+        mode_text = "● INSPECTION MODE (TAPS DISABLED)" if inspection_mode else "● AUTOMATION ACTIVE"
+        mode_color = (0, 255, 128) if inspection_mode else (0, 165, 255)
+        header_text = f"{mode_text} | State: {state.upper()} | Recognized: {len(entities)} elements"
+        (htw, hth), _ = cv2.getTextSize(header_text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+        bx1 = (w - htw - 30) // 2
+        bx2 = bx1 + htw + 30
+        cv2.rectangle(canvas, (bx1, 8), (bx2, 42), (15, 23, 42), -1)
+        cv2.rectangle(canvas, (bx1, 8), (bx2, 42), mode_color, 2)
+        cv2.putText(canvas, header_text, (bx1 + 15, 31), cv2.FONT_HERSHEY_DUPLEX, 0.55, mode_color, 1, cv2.LINE_AA)
+
+        return canvas
+
+    def match_template_detailed(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        min_score: float = 0.75,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Optional[Dict]:
+        """Returns detailed bounding box and score dictionary if matched."""
+        tmpl = self._templates.get(template_name)
+        if tmpl is None or frame is None or frame.size == 0:
+            return None
+
+        search_area = frame
+        ox, oy = 0, 0
+        if roi is not None:
+            x1, y1, x2, y2 = roi
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+            if x2 > x1 and y2 > y1:
+                search_area = frame[y1:y2, x1:x2]
+                ox, oy = x1, y1
+
+        th, tw = tmpl.shape[:2]
+        sh, sw = search_area.shape[:2]
+        if sh < th or sw < tw:
+            return None
+
+        res = cv2.matchTemplate(search_area, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        if max_val >= min_score:
+            x = ox + max_loc[0]
+            y = oy + max_loc[1]
+            cx = x + tw // 2
+            cy = y + th // 2
+            return {
+                "id": template_name,
+                "bbox": [int(x), int(y), int(tw), int(th)],
+                "center": [int(cx), int(cy)],
+                "confidence": round(float(max_val), 3),
+            }
+        return None
+
+    def detect_all_entities(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Scans current screen and returns all recognized UI elements, buttons,
+        resource bars, text, and base structures with bounding boxes.
+        """
+        if frame is None or frame.size == 0:
+            return []
+
+        h, w = frame.shape[:2]
+        entities: List[Dict] = []
+        state = self.detect_state(frame)
+
+        # 1. Match registered templates
+        friendly_names = {
+            "btn_battle": ("Attack / Battle Button", (0, 255, 128), "button"),
+            "btn_find_match": ("Find a Match Button", (0, 200, 255), "button"),
+            "btn_army_battle": ("Attack! (Army Screen)", (0, 255, 100), "button"),
+            "btn_next": ("Next Match Button", (0, 165, 255), "button"),
+            "btn_end_battle": ("End Battle Button", (0, 0, 255), "button"),
+            "btn_edit_army": ("Edit Army / Quick Train", (255, 180, 50), "button"),
+            "btn_army_close": ("Close Army Menu", (180, 180, 180), "button"),
+            "slot_sneaky_goblin": ("Sneaky Goblin Slot", (50, 220, 50), "troop"),
+            "icon_sword": ("Battle Swords Icon", (0, 220, 220), "icon"),
+        }
+
+        for tmpl_id, (label, color, category) in friendly_names.items():
+            match = self.match_template_detailed(frame, tmpl_id, min_score=0.75)
+            if match:
+                match["label"] = label
+                match["color"] = color
+                match["category"] = category
+                entities.append(match)
+
+        # 2. Detect Top-Right Home Resource Bars (Gold, Elixir, DE, Gems, Builders)
+        if state in (GameState.HOME, GameState.WALL_SELECTED):
+            if w >= 2200:
+                gold_box = [1860, 25, 330, 68]
+                elixir_box = [1860, 100, 330, 68]
+                de_box = [1860, 175, 330, 68]
+                gems_box = [1950, 245, 240, 68]
+                builders_box = [1050, 20, 250, 60]
+            else:
+                gold_box = [1560, 35, 300, 50]
+                elixir_box = [1560, 90, 300, 50]
+                de_box = [1560, 145, 300, 50]
+                gems_box = [1650, 200, 210, 50]
+                builders_box = [880, 20, 200, 50]
+
+            try:
+                g_crop = frame[gold_box[1] : gold_box[1] + gold_box[3], gold_box[0] : gold_box[0] + gold_box[2]]
+                e_crop = frame[elixir_box[1] : elixir_box[1] + elixir_box[3], elixir_box[0] : elixir_box[0] + elixir_box[2]]
+                de_crop = frame[de_box[1] : de_box[1] + de_box[3], de_box[0] : de_box[0] + de_box[2]]
+                gems_crop = frame[gems_box[1] : gems_box[1] + gems_box[3], gems_box[0] : gems_box[0] + gems_box[2]]
+
+                g_val = DigitOCR.extract_number_from_roi(g_crop)
+                e_val = DigitOCR.extract_number_from_roi(e_crop)
+                de_val = DigitOCR.extract_number_from_roi(de_crop)
+                gems_val = DigitOCR.extract_number_from_roi(gems_crop)
+
+                if g_val > 0 or e_val > 0:
+                    entities.append({
+                        "id": "gold_balance",
+                        "label": f"Gold: {g_val:,}",
+                        "category": "resource",
+                        "bbox": gold_box,
+                        "color": (0, 215, 255),
+                        "confidence": 0.98,
+                    })
+                    entities.append({
+                        "id": "elixir_balance",
+                        "label": f"Elixir: {e_val:,}",
+                        "category": "resource",
+                        "bbox": elixir_box,
+                        "color": (220, 50, 220),
+                        "confidence": 0.98,
+                    })
+                    if de_val > 0:
+                        entities.append({
+                            "id": "de_balance",
+                            "label": f"Dark Elixir: {de_val:,}",
+                            "category": "resource",
+                            "bbox": de_box,
+                            "color": (255, 200, 50),
+                            "confidence": 0.95,
+                        })
+                    if gems_val > 0:
+                        entities.append({
+                            "id": "gems_balance",
+                            "label": f"Gems: {gems_val:,}",
+                            "category": "resource",
+                            "bbox": gems_box,
+                            "color": (50, 255, 50),
+                            "confidence": 0.95,
+                        })
+                    entities.append({
+                        "id": "builders_hud",
+                        "label": "Builders Bar",
+                        "category": "hud",
+                        "bbox": builders_box,
+                        "color": (0, 160, 255),
+                        "confidence": 0.90,
+                    })
+            except Exception:
+                pass
+
+        # 3. Detect Battle Loot HUD (Top-Left during matchmaking / battle)
+        if state in (GameState.BATTLE_SEARCH, GameState.IN_BATTLE):
+            loot = self.read_battle_loot(frame)
+            if loot.get("gold", 0) > 0 or loot.get("elixir", 0) > 0:
+                loot_box = [120, 100, 360, 170] if w >= 2200 else [60, 50, 340, 160]
+                entities.append({
+                    "id": "available_loot",
+                    "label": f"Available: G:{loot['gold']:,} | E:{loot['elixir']:,}",
+                    "category": "loot",
+                    "bbox": loot_box,
+                    "color": (0, 215, 255),
+                    "confidence": 0.96,
+                })
+
+        # 4. Detect Outer Collectors
+        if state in (GameState.BATTLE_SEARCH, GameState.IN_BATTLE):
+            collectors = self.locate_outer_collectors(frame)
+            for i, (cx, cy) in enumerate(collectors[:8]):
+                entities.append({
+                    "id": f"collector_{i+1}",
+                    "label": f"Target Collector #{i+1}",
+                    "category": "target",
+                    "bbox": [cx - 32, cy - 32, 64, 64],
+                    "color": (0, 255, 255),
+                    "confidence": 0.88,
+                })
+
+        # 5. Detect Village Structures & 3D wireframe skeletons (Home Village)
+        if state in (GameState.HOME, GameState.WALL_SELECTED) or (w >= 1800 and state == GameState.UNKNOWN):
+            structures = self.detect_village_structures(frame)
+            entities.extend(structures)
+
+        return entities
+
+    def detect_village_structures(self, frame: np.ndarray) -> List[Dict]:
+        """
+        Segments the village playable field, detects buildings, defenses,
+        storages, Town Hall, and generates 3D isometric wireframe skeletons.
+        """
+        if frame is None or frame.size == 0:
+            return []
+        h, w = frame.shape[:2]
+        if w < 1200 or h < 600:
+            return []
+
+        cx, cy = w // 2, int(h * 0.50)
+        diamond_pts = np.array([
+            [cx, int(h * 0.12)],
+            [int(w * 0.86), cy],
+            [cx, int(h * 0.88)],
+            [int(w * 0.14), cy]
+        ], dtype=np.int32)
+
+        field_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(field_mask, [diamond_pts], 255)
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        grass_mask = cv2.inRange(hsv, (35, 35, 35), (85, 255, 210))
+        structures_mask = cv2.bitwise_and(cv2.bitwise_not(grass_mask), field_mask)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        cleaned = cv2.morphologyEx(structures_mask, cv2.MORPH_OPEN, kernel)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        structures = []
+
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 380 or area > 55000:
+                continue
+            x, y, bw, bh = cv2.boundingRect(c)
+            aspect = bw / float(bh)
+            if aspect < 0.4 or aspect > 2.5:
+                continue
+
+            crop_hsv = hsv[y : y + bh, x : x + bw]
+            yellow_ratio = np.mean(cv2.inRange(crop_hsv, (15, 75, 75), (35, 255, 255)) > 0)
+            purple_ratio = np.mean(cv2.inRange(crop_hsv, (135, 55, 55), (175, 255, 255)) > 0)
+            dark_ratio = np.mean(crop_hsv[:, :, 2] < 50)
+
+            scx, scy = x + bw // 2, y + bh // 2
+            dist_to_center = math.hypot(scx - cx, scy - cy)
+
+            if dist_to_center < 180 and area > 4500:
+                label = "Town Hall (Village Core)"
+                cat = "townhall"
+                color = (0, 235, 255)
+                conf = 0.96
+            elif yellow_ratio > 0.11:
+                label = "Gold Storage / Mine"
+                cat = "resource"
+                color = (0, 215, 255)
+                conf = 0.92
+            elif purple_ratio > 0.07:
+                label = "Elixir Storage / Collector"
+                cat = "resource"
+                color = (220, 50, 220)
+                conf = 0.92
+            elif dark_ratio > 0.25 and area > 1000:
+                label = "Dark Elixir Drill / Storage"
+                cat = "resource"
+                color = (255, 180, 50)
+                conf = 0.89
+            elif area > 1200:
+                label = "Defense / Structure"
+                cat = "defense"
+                color = (0, 165, 255)
+                conf = 0.88
+            else:
+                label = "Village Structure"
+                cat = "structure"
+                color = (180, 220, 0)
+                conf = 0.82
+
+            structures.append({
+                "id": f"structure_{len(structures) + 1}",
+                "label": label,
+                "category": cat,
+                "bbox": [x, y, bw, bh],
+                "color": color,
+                "confidence": conf,
+                "is_skeleton": True,
+            })
+
+        return structures
+
+    @staticmethod
+    def draw_village_grid_skeleton(canvas: np.ndarray):
+        """Renders the 44x44 isometric village field boundary and quadrant axes."""
+        h, w = canvas.shape[:2]
+        if w < 1200:
+            return
+        cx, cy = w // 2, int(h * 0.50)
+        field_pts = np.array([
+            [cx, int(h * 0.12)],
+            [int(w * 0.86), cy],
+            [cx, int(h * 0.88)],
+            [int(w * 0.14), cy]
+        ], dtype=np.int32)
+
+        # Outer perimeter diamond
+        cv2.polylines(canvas, [field_pts], True, (0, 220, 160), 2, cv2.LINE_AA)
+
+        # Inner concentric isometric grid rings
+        center = np.array([cx, cy], dtype=np.float32)
+        for frac in (0.33, 0.66):
+            sub_pts = (center + (field_pts - center) * frac).astype(np.int32)
+            cv2.polylines(canvas, [sub_pts], True, (0, 130, 90), 1, cv2.LINE_AA)
+
+        # Quadrant axes
+        cv2.line(canvas, (cx, int(h * 0.12)), (cx, int(h * 0.88)), (0, 160, 110), 1, cv2.LINE_AA)
+        cv2.line(canvas, (int(w * 0.14), cy), (int(w * 0.86), cy), (0, 160, 110), 1, cv2.LINE_AA)
+
+        # Center Village Core crosshair
+        cv2.drawMarker(canvas, (cx, cy), (0, 255, 200), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+        cv2.putText(canvas, "[VILLAGE GRID 44x44]", (cx - 75, cy + 28), cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 220, 160), 1, cv2.LINE_AA)
+
+    @staticmethod
+    def draw_isometric_skeleton(canvas: np.ndarray, ent: Dict):
+        """Draws a 3D isometric wireframe skeleton around a detected village structure."""
+        bbox = ent.get("bbox")
+        if not bbox or len(bbox) != 4:
+            return
+        x, y, bw, bh = bbox
+        color = ent.get("color", (0, 255, 255))
+        label = ent.get("label", "Structure")
+        conf = ent.get("confidence")
+
+        cx, cy = x + bw // 2, y + bh // 2
+
+        # 1. Base ground diamond footprint
+        h_half = max(8, bh // 3)
+        w_half = max(8, bw // 2)
+        b_top = (cx, cy - h_half)
+        b_right = (cx + w_half, cy)
+        b_bottom = (cx, cy + h_half)
+        b_left = (cx - w_half, cy)
+        base_pts = np.array([b_top, b_right, b_bottom, b_left], dtype=np.int32)
+        cv2.polylines(canvas, [base_pts], True, color, 1, cv2.LINE_AA)
+
+        # 2. Elevated roof diamond
+        elev = int(bh * 0.38)
+        r_top = (b_top[0], b_top[1] - elev)
+        r_right = (b_right[0], b_right[1] - elev)
+        r_bottom = (b_bottom[0], b_bottom[1] - elev)
+        r_left = (b_left[0], b_left[1] - elev)
+        roof_pts = np.array([r_top, r_right, r_bottom, r_left], dtype=np.int32)
+        cv2.polylines(canvas, [roof_pts], True, color, 2, cv2.LINE_AA)
+
+        # 3. Vertical corner pillars
+        cv2.line(canvas, b_top, r_top, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_right, r_right, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_bottom, r_bottom, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, b_left, r_left, color, 1, cv2.LINE_AA)
+
+        # 4. Roof crosshairs
+        cv2.line(canvas, r_top, r_bottom, color, 1, cv2.LINE_AA)
+        cv2.line(canvas, r_left, r_right, color, 1, cv2.LINE_AA)
+
+        # 5. Tactical skeleton badge
+        badge_text = label + (f" [{conf:.0%}]" if conf is not None else "")
+        (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
+        by = max(4, r_top[1] - th - 6)
+        cv2.rectangle(canvas, (cx - tw // 2 - 4, by), (cx + tw // 2 + 4, by + th + 4), (10, 15, 25), -1)
+        cv2.rectangle(canvas, (cx - tw // 2 - 4, by), (cx + tw // 2 + 4, by + th + 4), color, 1)
+        cv2.putText(canvas, badge_text, (cx - tw // 2, by + th), cv2.FONT_HERSHEY_DUPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+    def draw_detection_overlay(
+        self,
+        frame: np.ndarray,
+        entities: Optional[List[Dict]] = None,
+        inspection_mode: bool = True,
+    ) -> np.ndarray:
+        """
+        Renders HUD bounding boxes, corner brackets, labels, crosshairs,
+        village grid skeletons, and 3D isometric building wireframes onto the frame.
+        Executes in sub-millisecond time by utilizing asynchronous precomputed perception.
+        """
+        if frame is None or frame.size == 0:
+            return frame
+
+        canvas = frame.copy()
+        h, w = canvas.shape[:2]
+
+        if entities is None:
+            entities, state = self.get_cached_detections()
+            if not entities:
+                # Fast single scan fallback
+                state = self.detect_state(frame)
+        else:
+            state = self.detect_state(frame)
+
+        # 1. Draw Village Grid Skeleton on Home or Matchmaking
+        if state in (GameState.HOME, GameState.WALL_SELECTED, GameState.BATTLE_SEARCH, GameState.IN_BATTLE) or state == GameState.UNKNOWN:
+            self.draw_village_grid_skeleton(canvas)
+
+        # 2. Draw entities (3D wireframe skeletons for buildings; HUD brackets for buttons)
+        for ent in entities:
+            if ent.get("is_skeleton"):
+                self.draw_isometric_skeleton(canvas, ent)
+                continue
+
+            bbox = ent.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            x, y, bw, bh = bbox
+            color = ent.get("color", (0, 255, 128))
+            label = ent.get("label", ent.get("id", "Object"))
+            conf = ent.get("confidence")
+
+            # Semi-transparent fill
+            overlay = canvas.copy()
+            cv2.rectangle(overlay, (x, y), (x + bw, y + bh), color, -1)
+            cv2.addWeighted(overlay, 0.15, canvas, 0.85, 0, canvas)
+
+            # Border
+            cv2.rectangle(canvas, (x, y), (x + bw, y + bh), color, 2)
+
+            # Corner brackets (length = 14)
+            L = min(14, max(4, bw // 4), max(4, bh // 4))
+            cv2.line(canvas, (x, y), (x + L, y), color, 3)
+            cv2.line(canvas, (x, y), (x, y + L), color, 3)
+            cv2.line(canvas, (x + bw, y), (x + bw - L, y), color, 3)
+            cv2.line(canvas, (x + bw, y), (x + bw, y + L), color, 3)
+            cv2.line(canvas, (x, y + bh), (x + L, y + bh), color, 3)
+            cv2.line(canvas, (x, y + bh), (x, y + bh - L), color, 3)
+            cv2.line(canvas, (x + bw, y + bh), (x + bw - L, y + bh), color, 3)
+            cv2.line(canvas, (x + bw, y + bh), (x + bw, y + bh - L), color, 3)
+
+            # Center crosshair for tap target
+            cx, cy = x + bw // 2, y + bh // 2
+            cv2.line(canvas, (cx - 5, cy), (cx + 5, cy), color, 2)
+            cv2.line(canvas, (cx, cy - 5), (cx, cy + 5), color, 2)
+
+            # Label badge with dark background for 100% legibility
+            text = label + (f" [{conf:.0%}]" if conf is not None else "")
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+            by = max(4, y - th - 8)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), (15, 23, 42), -1)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), color, 1)
+            cv2.putText(canvas, text, (x + 5, by + th + 2), cv2.FONT_HERSHEY_DUPLEX, 0.55, color, 1, cv2.LINE_AA)
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+            by = max(4, y - th - 8)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), (15, 23, 42), -1)
+            cv2.rectangle(canvas, (x, by), (x + tw + 10, by + th + 6), color, 1)
+            cv2.putText(canvas, text, (x + 5, by + th + 2), cv2.FONT_HERSHEY_DUPLEX, 0.55, color, 1, cv2.LINE_AA)
+
+        # 2. Top Header HUD Banner
+        mode_text = "● INSPECTION MODE (TAPS DISABLED)" if inspection_mode else "● AUTOMATION ACTIVE"
+        mode_color = (0, 255, 128) if inspection_mode else (0, 165, 255)
+        header_text = f"{mode_text} | State: {state.upper()} | Recognized: {len(entities)} elements"
+        (htw, hth), _ = cv2.getTextSize(header_text, cv2.FONT_HERSHEY_DUPLEX, 0.55, 1)
+        bx1 = (w - htw - 30) // 2
+        bx2 = bx1 + htw + 30
+        cv2.rectangle(canvas, (bx1, 8), (bx2, 42), (15, 23, 42), -1)
+        cv2.rectangle(canvas, (bx1, 8), (bx2, 42), mode_color, 2)
+        cv2.putText(canvas, header_text, (bx1 + 15, 31), cv2.FONT_HERSHEY_DUPLEX, 0.55, mode_color, 1, cv2.LINE_AA)
+
+        return canvas

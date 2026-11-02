@@ -381,11 +381,14 @@ body {
 .screen-wrapper {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 2378 / 1080;
   background: #000;
   border-radius: var(--radius-sm);
   overflow: hidden;
   border: 1px solid var(--bg-card-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .screen-wrapper img {
@@ -641,6 +644,81 @@ input:checked + .toggle-slider:before {
 
 .telemetry-item .value.highlight {
   color: var(--gold);
+}
+
+/* Identified Elements Card & Vision Perception */
+.detections-card {
+  margin-top: 20px;
+  padding: 20px 22px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--bg-card-border);
+}
+
+.detections-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.detection-item {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: all 0.2s ease;
+}
+
+.detection-item:hover {
+  border-color: rgba(56, 189, 248, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.detection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.detection-category {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.cat-resource { background: rgba(0, 215, 255, 0.15); color: #00d7ff; border: 1px solid rgba(0, 215, 255, 0.3); }
+.cat-button { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+.cat-hud { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+.cat-loot { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+.cat-target { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+.cat-troop { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+.cat-icon { background: rgba(200, 200, 200, 0.15); color: #e2e8f0; border: 1px solid rgba(200, 200, 200, 0.3); }
+
+.detection-conf {
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+.detection-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.detection-coords {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #64748b;
 }
 
 /* Responsive */

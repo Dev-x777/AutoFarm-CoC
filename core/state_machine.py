@@ -54,8 +54,29 @@ class BotEngine:
             self.device, self.vision, config.home, log_callback=self.log
         )
 
+        self.automation_enabled = False  # SAFETY DEFAULT: Autonomous attacking paused for inspection
+        self.detection_overlay = True    # Bounding boxes overlay on website
+        self.device.touch_enabled = False  # HARD SAFETY SHIELD: Hardware touch injection disabled!
         self.attacks_in_session = 0
-        self.current_action = "Idle"
+        self.current_action = "Inspection Mode (Observe & Identify)"
+
+        # Asynchronous perception worker: runs at 3-4 Hz without blocking video streamer
+        self._perception_running = True
+        self._perception_thread = threading.Thread(target=self._perception_worker, daemon=True, name="AsyncPerceptionWorker")
+        self._perception_thread.start()
+
+    def _perception_worker(self):
+        """Asynchronously computes CV detections and village skeletons at 3-4 Hz without blocking video stream."""
+        while getattr(self, "_perception_running", True):
+            try:
+                frame = self.device.capture_frame()
+                if frame is not None and frame.size > 0:
+                    state = self.vision.detect_state(frame)
+                    entities = self.vision.detect_all_entities(frame)
+                    self.vision.update_cached_detections(entities, state)
+                time.sleep(0.25)
+            except Exception:
+                time.sleep(0.5)
 
     def log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -69,6 +90,8 @@ class BotEngine:
         """Starts the autonomous bot loop in a background thread."""
         if self.status == BotStatus.RUNNING:
             return
+        if hasattr(self.device, "ensure_game_running"):
+            self.device.ensure_game_running()
         self._stop_event.clear()
         self._pause_event.clear()
         self.status = BotStatus.RUNNING
@@ -91,15 +114,24 @@ class BotEngine:
     def stop(self):
         """Stops the bot operations gracefully."""
         self._stop_event.set()
+        self._perception_running = False
         self.status = BotStatus.STOPPED
         self.current_action = "Stopped"
+        self.device.stop_streamer()
         self.log("AutoFarm engine stopped.")
 
     def get_summary(self) -> Dict:
         """Returns real-time session telemetry."""
+        is_fg = True
+        if hasattr(self.device, "is_game_foreground"):
+            is_fg = self.device.is_game_foreground()
         return {
             "status": self.status,
             "current_action": self.current_action,
+            "automation_enabled": self.automation_enabled,
+            "touch_enabled": getattr(self.device, "touch_enabled", False),
+            "detection_overlay": self.detection_overlay,
+            "is_game_foreground": is_fg,
             "bases_scanned": self.attacker.stats.bases_scanned,
             "attacks_completed": self.attacker.stats.bases_attacked,
             "gold_looted": self.attacker.stats.total_gold_looted,
@@ -112,7 +144,7 @@ class BotEngine:
 
     def _run_loop(self):
         """Main autonomous decision loop."""
-        self.log("Beginning autonomous farming cycle...")
+        self.log("Inspection Mode Active: Learning & identifying village elements without tapping.")
 
         while not self._stop_event.is_set():
             if self._pause_event.is_set():
@@ -120,6 +152,19 @@ class BotEngine:
                 continue
 
             try:
+                # SAFETY SHIELD 1: Verify Clash of Clans is actively focused in foreground
+                if self.device.mode != "mock" and hasattr(self.device, "is_game_foreground"):
+                    if not self.device.is_game_foreground():
+                        self.current_action = "Paused (Clash of Clans Inactive)"
+                        time.sleep(1.0)
+                        continue
+
+                # SAFETY SHIELD 2: If automation / attacking is disabled (Inspection Mode)
+                if not self.automation_enabled:
+                    self.current_action = "Inspection Mode (Observe & Identify)"
+                    time.sleep(0.5)
+                    continue
+
                 frame = self.device.capture_frame()
                 state = self.vision.detect_state(frame)
 
@@ -228,11 +273,10 @@ class BotEngine:
                     time.sleep(1.5)
                     continue
 
-                # Unknown state: tap screen center to clear random popovers
-                self.current_action = "Syncing View"
-                self.log(f"Unrecognized UI state: {state}. Deselecting overlays...")
-                self.device.tap(200, 500)
-                time.sleep(2.0)
+                # Unknown state: do NOT tap blindly. Wait safely for recognized view.
+                self.current_action = "Observing (Awaiting Village Screen)"
+                time.sleep(1.0)
+                continue
 
             except Exception as e:
                 self.log(f"Loop error: {e}. Retrying in 3 seconds...")

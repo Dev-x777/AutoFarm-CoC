@@ -13,7 +13,9 @@ import os
 import platform
 import random
 import shutil
+import struct
 import subprocess
+import threading
 import time
 import urllib.request
 import zipfile
@@ -88,6 +90,28 @@ def find_or_download_adb(custom_path: str = "auto") -> Optional[str]:
     except Exception as e:
         print(f"[Device] Failed to auto-download ADB: {e}")
 
+    return None
+
+
+def find_scrcpy() -> Optional[str]:
+    """Finds scrcpy binary in bin directory or system PATH."""
+    local_scrcpy = BIN_DIR / "scrcpy" / ("scrcpy.exe" if platform.system() == "Windows" else "scrcpy")
+    if local_scrcpy.is_file():
+        return str(local_scrcpy)
+    system_scrcpy = shutil.which("scrcpy")
+    if system_scrcpy:
+        return system_scrcpy
+    return None
+
+
+def find_ffmpeg() -> Optional[str]:
+    """Finds ffmpeg binary in bin directory or system PATH."""
+    local_ffmpeg = BIN_DIR / ("ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg")
+    if local_ffmpeg.is_file():
+        return str(local_ffmpeg)
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
     return None
 
 
@@ -280,7 +304,7 @@ class MockDevice:
         return frame
 
     def tap(self, x: int, y: int):
-        jx, jy = Humanizer.jitter_point(x, y)
+        jx, jy = x, y
         # Simulate button clicks based on coordinates
         if self.current_state == "home":
             # Attack button (bottom-left)
@@ -355,10 +379,200 @@ class DeviceController:
         self.target_width, self.target_height = target_resolution
         self.adb_bin = None
         self.mock = None
+        self.scrcpy_bin = find_scrcpy()
+        self.ffmpeg_bin = find_ffmpeg()
         self.device_width = 1920
         self.device_height = 1080
+        self.touch_enabled: bool = False  # SAFETY DEFAULT: Touch inputs disabled for inspection mode
+        self._current_frame: Optional[np.ndarray] = None
+        self._latest_jpeg_bytes: Optional[bytes] = None
+        self._frame_lock = threading.Lock()
+        self._stream_running = False
+        self._stream_thread: Optional[threading.Thread] = None
+        self._scrcpy_proc: Optional[subprocess.Popen] = None
+        self._ffmpeg_proc: Optional[subprocess.Popen] = None
+        self._fifo_path: Optional[str] = None
 
         self.initialize()
+        self.start_streamer()
+
+    def start_streamer(self):
+        """Starts real-time background video capture thread for 0ms latency frames."""
+        if self._stream_running:
+            return
+        self._stream_running = True
+        self._stream_thread = threading.Thread(target=self._stream_worker, daemon=True, name="RealTimeFrameStreamer")
+        self._stream_thread.start()
+
+    def stop_streamer(self):
+        """Gracefully terminates background video streaming thread and subprocesses."""
+        self._stream_running = False
+        self._cleanup_scrcpy()
+        if self._stream_thread and self._stream_thread.is_alive():
+            self._stream_thread.join(timeout=2.0)
+
+    def _cleanup_scrcpy(self):
+        """Kills active scrcpy and ffmpeg subprocesses and removes named pipe FIFO."""
+        if self._ffmpeg_proc:
+            try:
+                self._ffmpeg_proc.terminate()
+                self._ffmpeg_proc.wait(timeout=0.8)
+            except Exception:
+                try:
+                    self._ffmpeg_proc.kill()
+                except Exception:
+                    pass
+            self._ffmpeg_proc = None
+
+        if self._scrcpy_proc:
+            try:
+                self._scrcpy_proc.terminate()
+                self._scrcpy_proc.wait(timeout=0.8)
+            except Exception:
+                try:
+                    self._scrcpy_proc.kill()
+                except Exception:
+                    pass
+            self._scrcpy_proc = None
+
+        if self._fifo_path and os.path.exists(self._fifo_path):
+            try:
+                os.remove(self._fifo_path)
+            except Exception:
+                pass
+            self._fifo_path = None
+
+    def _stream_worker(self):
+        """Continuous high-speed loop keeping in-memory frame buffer and JPEG stream updated in real time."""
+        while self._stream_running:
+            try:
+                if self.mode == "adb" and self.scrcpy_bin and self.ffmpeg_bin and self.serial:
+                    self._run_scrcpy_stream()
+                else:
+                    self._run_screencap_stream_step()
+            except Exception:
+                time.sleep(0.5)
+
+    def _run_scrcpy_stream(self):
+        """Streams hardware H.264 video at 30+ FPS via scrcpy and ffmpeg into MJPEG."""
+        pid = os.getpid()
+        safe_serial = self.serial.replace(":", "_").replace(".", "_")
+        self._fifo_path = f"/tmp/scrcpy_{safe_serial}_{pid}.mkv"
+        if os.path.exists(self._fifo_path):
+            try:
+                os.remove(self._fifo_path)
+            except Exception:
+                pass
+        try:
+            os.mkfifo(self._fifo_path)
+        except Exception as e:
+            print(f"[Device] Could not create FIFO {self._fifo_path}: {e}")
+            self._run_screencap_stream_step()
+            return
+
+        env = os.environ.copy()
+        if self.adb_bin:
+            adb_dir = str(Path(self.adb_bin).parent)
+            env["PATH"] = f"{adb_dir}:{env.get('PATH', '')}"
+            env["ADB"] = str(self.adb_bin)
+
+        cmd_scrcpy = [
+            self.scrcpy_bin,
+            "-s", self.serial,
+            "--no-window",
+            "--no-audio",
+            "--max-size", "1440",
+            "--video-bit-rate", "2M",
+            "--max-fps", "30",
+            f"--record={self._fifo_path}"
+        ]
+
+        cmd_ffmpeg = [
+            self.ffmpeg_bin,
+            "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-f", "matroska",
+            "-i", self._fifo_path,
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-q:v", "5",
+            "pipe:1"
+        ]
+
+        try:
+            self._scrcpy_proc = subprocess.Popen(
+                cmd_scrcpy, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            self._ffmpeg_proc = subprocess.Popen(
+                cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=65536
+            )
+
+            buf = bytearray()
+            while self._stream_running:
+                chunk = self._ffmpeg_proc.stdout.read(16384)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+                # Skip to latest complete JPEG in buffer to guarantee ZERO queue latency
+                latest_jpg = None
+                while True:
+                    s = buf.find(b"\xff\xd8")
+                    if s == -1:
+                        buf.clear()
+                        break
+                    e = buf.find(b"\xff\xd9", s + 2)
+                    if e == -1:
+                        if s > 0:
+                            del buf[:s]
+                        break
+                    latest_jpg = bytes(buf[s : e + 2])
+                    del buf[: e + 2]
+
+                if latest_jpg is not None:
+                    # Decode JPEG into OpenCV numpy array
+                    arr = np.frombuffer(latest_jpg, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        h, w = frame.shape[:2]
+                        if h > w:
+                            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                            h, w = frame.shape[:2]
+                            ok, buf_rot = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                            if ok:
+                                latest_jpg = buf_rot.tobytes()
+                        with self._frame_lock:
+                            self._current_frame = frame
+                            self._latest_jpeg_bytes = latest_jpg
+                            self.device_width = w
+                            self.device_height = h
+                            self.target_width = w
+                            self.target_height = h
+        finally:
+            self._cleanup_scrcpy()
+
+    def _run_screencap_stream_step(self):
+        frame = self._fetch_frame_now()
+        if frame is not None:
+            h, w = frame.shape[:2]
+            if h > w:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                h, w = frame.shape[:2]
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 72])
+            with self._frame_lock:
+                self._current_frame = frame
+                if ok:
+                    self._latest_jpeg_bytes = buf.tobytes()
+                self.device_width = w
+                self.device_height = h
+                self.target_width = w
+                self.target_height = h
+            time.sleep(0.04)
+        else:
+            time.sleep(0.25)
 
     def initialize(self):
         """Discovers or starts the device connection."""
@@ -387,6 +601,8 @@ class DeviceController:
                 self.serial = devices[0]
             print(f"[Device] Connected to ADB device: {self.serial}")
             self.detect_screen_size()
+            self.target_width = self.device_width
+            self.target_height = self.device_height
             self.mode = "adb"
         else:
             if self.mode == "auto":
@@ -424,57 +640,185 @@ class DeviceController:
             return
         try:
             res = self._run_adb(["shell", "wm", "size"])
-            # Format: Physical size: 1920x1080 or Override size: ...
+            # Format: Physical size: 1272x2800, Override size: 1080x2378
+            chosen = None
             for line in res.stdout.splitlines():
-                if "size:" in line.lower():
-                    dim = line.split(":")[-1].strip()
-                    w, h = map(int, dim.split("x"))
-                    # Normalize to landscape
-                    self.device_width = max(w, h)
-                    self.device_height = min(w, h)
-                    print(f"[Device] Detected device resolution: {self.device_width}x{self.device_height}")
-                    return
+                if "override size:" in line.lower():
+                    chosen = line.split(":")[-1].strip()
+                    break
+                elif "size:" in line.lower() and not chosen:
+                    chosen = line.split(":")[-1].strip()
+
+            if chosen:
+                w, h = map(int, chosen.split("x"))
+                self.device_width = max(w, h)
+                self.device_height = min(w, h)
+                print(f"[Device] Detected device resolution: {self.device_width}x{self.device_height}")
         except Exception as e:
             print(f"[Device] Could not detect screen size: {e}")
 
     def capture_frame(self) -> np.ndarray:
-        """Captures frame from device and scales it to normalized target resolution (1920x1080)."""
+        """Returns the latest screen frame instantly in real time (0ms latency, not screenshot-blocking)."""
+        with self._frame_lock:
+            if self._current_frame is not None:
+                return self._current_frame.copy()
+            if self._latest_jpeg_bytes is not None:
+                arr = np.frombuffer(self._latest_jpeg_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self._current_frame = frame
+                    return frame.copy()
+
+        # Immediate single fetch if background streamer has not yet populated buffer
+        frame = self._fetch_frame_now()
+        if frame is not None:
+            with self._frame_lock:
+                self._current_frame = frame
+            return frame.copy()
+
+        if not self.mock:
+            self.mock = MockDevice(self.target_width, self.target_height)
+        return self.mock.capture_frame()
+
+    def capture_frame_jpeg(self) -> Optional[bytes]:
+        """Returns the latest screen frame as encoded JPEG bytes directly (zero-reencode overhead)."""
+        with self._frame_lock:
+            if self._latest_jpeg_bytes is not None:
+                return self._latest_jpeg_bytes
+
+        frame = self.capture_frame()
+        if frame is not None:
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ok:
+                b = buf.tobytes()
+                with self._frame_lock:
+                    self._latest_jpeg_bytes = b
+                return b
+        return None
+
+    def ensure_game_running(self):
+        """Checks if Clash of Clans is in the foreground without forcefully stealing focus."""
+        if self.mode != "adb" or not self.adb_bin:
+            return
+        if self.is_game_foreground():
+            print("[Device] Clash of Clans is verified in foreground.")
+        else:
+            print("[Device Safety Shield] Clash of Clans is NOT in foreground. AutoFarm is holding touch actions safely.")
+
+    def _fetch_frame_now(self) -> Optional[np.ndarray]:
+        """Low-level hardware screencap with fast raw-framebuffer acceleration."""
         if self.mode == "mock":
+            if not self.mock:
+                self.mock = MockDevice(self.target_width, self.target_height)
             return self.mock.capture_frame()
 
+        if not self.adb_bin:
+            return None
+
+        # 1. Fast path: Raw uncompressed framebuffer DMA dump (No PNG compression lag)
+        try:
+            cmd = [self.adb_bin]
+            if self.serial:
+                cmd.extend(["-s", self.serial])
+            cmd.extend(["exec-out", "screencap"])
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
+            if proc.returncode == 0 and len(proc.stdout) > 16:
+                raw = proc.stdout
+                w, h = struct.unpack("<II", raw[:8])
+                if 200 < w < 4000 and 200 < h < 4000:
+                    expected = 16 + (w * h * 4)
+                    if len(raw) >= expected:
+                        arr = np.frombuffer(raw[16:expected], dtype=np.uint8).reshape((h, w, 4))
+                        frame = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                        if h > w:
+                            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                        self.device_width = frame.shape[1]
+                        self.device_height = frame.shape[0]
+                        self.target_width = self.device_width
+                        self.target_height = self.device_height
+                        return frame
+        except Exception:
+            pass
+
+        # 2. Reliable fallback: Standard screencap -p
         try:
             cmd = [self.adb_bin]
             if self.serial:
                 cmd.extend(["-s", self.serial])
             cmd.extend(["exec-out", "screencap", "-p"])
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-            if proc.returncode != 0 or len(proc.stdout) < 1000:
-                raise RuntimeError("Failed to capture frame via ADB")
-            
-            # Decode PNG bytes to cv2 image
-            img_arr = np.frombuffer(proc.stdout, dtype=np.uint8)
-            frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8)
+            if proc.returncode == 0 and len(proc.stdout) > 1000:
+                img_arr = np.frombuffer(proc.stdout, dtype=np.uint8)
+                frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    h, w = frame.shape[:2]
+                    if h > w:
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                    self.device_width = frame.shape[1]
+                    self.device_height = frame.shape[0]
+                    self.target_width = self.device_width
+                    self.target_height = self.device_height
+                    return frame
+        except Exception:
+            pass
 
-            # Ensure landscape orientation
-            h, w = frame.shape[:2]
-            if h > w:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                h, w = frame.shape[:2]
+        return None
 
-            # Resize to virtual target resolution (1920x1080) for uniform coordinates
-            if (w, h) != (self.target_width, self.target_height):
-                frame = cv2.resize(frame, (self.target_width, self.target_height), interpolation=cv2.INTER_AREA)
+    def is_game_foreground(self) -> bool:
+        """Strict safety check: returns True ONLY if Clash of Clans is actively focused in foreground."""
+        if self.mode == "mock":
+            return True
+        if not self.adb_bin or not self.serial:
+            return False
+        now = time.time()
+        if hasattr(self, "_last_fg_check") and (now - self._last_fg_check) < 0.8:
+            return getattr(self, "_last_fg_result", False)
+        try:
+            res = self._run_adb(["shell", "dumpsys window | grep mCurrentFocus"], timeout=1.5)
+            is_fg = bool(res.returncode == 0 and res.stdout and "com.supercell.clashofclans" in res.stdout)
+            self._last_fg_check = now
+            self._last_fg_result = is_fg
+            return is_fg
+        except Exception:
+            return False
 
-            return frame
-        except Exception as e:
-            print(f"[Device] Screencap error: {e}. Falling back to blank or mock frame.")
-            if not self.mock:
-                self.mock = MockDevice(self.target_width, self.target_height)
-            return self.mock.capture_frame()
+    def set_touch_enabled(self, enabled: bool):
+        """Toggles hardware touch injection on/off."""
+        self.touch_enabled = enabled
+        status_str = "ENABLED" if enabled else "DISABLED (Inspection Mode)"
+        print(f"[Device Safety Guard] Touch inputs {status_str}.")
+
+    def is_game_foreground(self) -> bool:
+        """Strict safety check: returns True ONLY if Clash of Clans is actively focused in foreground."""
+        if self.mode == "mock":
+            return True
+        if not self.adb_bin or not self.serial:
+            return False
+        now = time.time()
+        if hasattr(self, "_last_fg_check") and (now - self._last_fg_check) < 0.8:
+            return getattr(self, "_last_fg_result", False)
+        try:
+            res = self._run_adb(["shell", "dumpsys window | grep mCurrentFocus"], timeout=1.5)
+            is_fg = bool(res.returncode == 0 and res.stdout and "com.supercell.clashofclans" in res.stdout)
+            self._last_fg_check = now
+            self._last_fg_result = is_fg
+            return is_fg
+        except Exception:
+            return False
+
+    def set_touch_enabled(self, enabled: bool):
+        """Toggles hardware touch injection on/off."""
+        self.touch_enabled = enabled
+        status_str = "ENABLED" if enabled else "DISABLED (Inspection Mode)"
+        print(f"[Device Safety Guard] Touch inputs {status_str}.")
 
     def _scale_coords(self, x: int, y: int) -> Tuple[int, int]:
-        """Translates virtual 1920x1080 coordinate to native device screen coordinate."""
+        """Translates virtual coordinate to native device screen coordinate."""
         if self.mode == "mock":
+            return x, y
+        if self.device_width == self.target_width and self.device_height == self.target_height:
+            return x, y
+        if x > self.target_width or y > self.target_height:
             return x, y
         sx = int(x * (self.device_width / float(self.target_width)))
         sy = int(y * (self.device_height / float(self.target_height)))
@@ -482,10 +826,31 @@ class DeviceController:
 
     def tap(self, x: int, y: int, press_duration_ms: Optional[int] = None):
         """Sends a humanized jittered tap with realistic touch duration."""
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Tap at ({x}, {y}) skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Tap at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Tap at ({x}, {y}) skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Tap at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
         jx, jy = Humanizer.jitter_point(x, y, max_radius=8)
         if self.mode == "mock":
             self.mock.tap(jx, jy)
-            Humanizer.random_sleep(0.1, 0.25)
+            with self._frame_lock:
+                self._current_frame = None
+                self._latest_jpeg_bytes = None
+            Humanizer.random_sleep(0.01, 0.05)
             return
 
         rx, ry = self._scale_coords(jx, jy)
@@ -496,6 +861,24 @@ class DeviceController:
 
     def tap_hold(self, x: int, y: int, duration_ms: int = 500):
         """Holds a position (useful for continuous troop deployment)."""
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Hold at ({x}, {y}) skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Hold at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Hold at ({x}, {y}) skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Hold at ({x}, {y}) BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
         jx, jy = Humanizer.jitter_point(x, y)
         if self.mode == "mock":
             self.mock.tap(jx, jy)
@@ -505,6 +888,24 @@ class DeviceController:
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 400):
         """Executes a curved Bézier swipe mimicking human hand motion."""
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Swipe skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Swipe BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
+        if self.mode != "mock":
+            if not self.touch_enabled:
+                print(f"[Device Safety Guard] Touch inputs disabled. Swipe skipped.")
+                return
+
+            if not self.is_game_foreground():
+                print(f"[Device Safety Guard] CRITICAL: Swipe BLOCKED! Clash of Clans is NOT in foreground.")
+                return
+
         if self.mode == "mock":
             self.mock.swipe(x1, y1, x2, y2, duration_ms)
             return

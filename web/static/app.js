@@ -3,24 +3,111 @@
  */
 
 let pollInterval = null;
-let frameRefreshInterval = null;
 
 // Initialize on DOM load
 document.addEventListener("DOMContentLoaded", () => {
   fetchStatus();
   fetchLogs();
+  fetchDetections();
   loadConfigIntoUI();
+  initLiveVideoStream();
 
-  // Polling timers
+  // Metrics, detections and logs polling (lightweight JSON only)
   pollInterval = setInterval(() => {
     fetchStatus();
     fetchLogs();
-  }, 1200);
-
-  frameRefreshInterval = setInterval(() => {
-    refreshFrame();
-  }, 1800);
+    fetchDetections();
+  }, 1000);
 });
+
+// Setup true real-time video stream (WebSocket binary stream with MJPEG & fast-fetch fallbacks)
+let activeStreamWs = null;
+let currentBlobUrl = null;
+let isFetchingFastFrame = false;
+let isFrameRendering = false;
+
+function initLiveVideoStream() {
+  const img = document.getElementById("live-screen-img");
+  if (!img) return;
+
+  // 1. Primary: Ultra-low-latency WebSocket binary stream
+  try {
+    if (activeStreamWs) {
+      activeStreamWs.close();
+      activeStreamWs = null;
+    }
+    const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProto}//${location.host}/ws/stream`;
+    activeStreamWs = new WebSocket(wsUrl);
+    activeStreamWs.binaryType = "blob";
+
+    activeStreamWs.onopen = () => {
+      console.log("[AutoFarm Stream] WebSocket live stream connected (30+ FPS)!");
+      const pill = document.getElementById("overlay-status-pill");
+      if (pill) pill.textContent = "Live Stream: Connected (30 FPS)";
+    };
+
+    activeStreamWs.onmessage = (event) => {
+      if (event.data instanceof Blob) {
+        if (isFrameRendering) return; // Drop frame if previous is still rendering (prevents queue backup)
+        isFrameRendering = true;
+        const newUrl = URL.createObjectURL(event.data);
+        const oldUrl = currentBlobUrl;
+        img.onload = () => {
+          if (oldUrl) {
+            URL.revokeObjectURL(oldUrl);
+          }
+          isFrameRendering = false;
+        };
+        img.onerror = () => {
+          if (oldUrl) URL.revokeObjectURL(oldUrl);
+          isFrameRendering = false;
+        };
+        currentBlobUrl = newUrl;
+        img.src = newUrl;
+      }
+    };
+
+    activeStreamWs.onerror = () => {
+      console.warn("[AutoFarm Stream] WebSocket unavailable, falling back to MJPEG stream...");
+      fallbackToMjpeg(img);
+    };
+
+    activeStreamWs.onclose = (evt) => {
+      if (evt.code !== 1000) {
+        setTimeout(initLiveVideoStream, 2000);
+      }
+    };
+  } catch (e) {
+    fallbackToMjpeg(img);
+  }
+}
+
+function fallbackToMjpeg(img) {
+  img.src = "/api/stream";
+  img.onerror = () => {
+    startFastFetchLoop(img);
+  };
+}
+
+async function startFastFetchLoop(img) {
+  if (isFetchingFastFrame) return;
+  isFetchingFastFrame = true;
+  try {
+    const res = await fetch("/api/frame?t=" + Date.now());
+    if (res.ok) {
+      const blob = await res.blob();
+      const newUrl = URL.createObjectURL(blob);
+      img.src = newUrl;
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = newUrl;
+    }
+  } catch (e) {
+  } finally {
+    isFetchingFastFrame = false;
+    setTimeout(() => startFastFetchLoop(img), 40); // ~25 FPS
+  }
+}
 
 // Format integers with thousand separators
 function formatNumber(num) {
@@ -54,6 +141,42 @@ async function fetchStatus() {
       devLabel.textContent = "Simulation Mode (Mock)";
     } else {
       devLabel.textContent = "Android Device Connected";
+    }
+
+    // Update Safety Shield Badge
+    const safetyBadge = document.getElementById("safety-shield-badge");
+    const safetyLabel = document.getElementById("safety-label");
+    if (safetyBadge && safetyLabel) {
+      if (data.is_game_foreground === false) {
+        safetyLabel.textContent = "🛡️ CoC Minimized (Safety Lock)";
+        safetyBadge.style.background = "rgba(239, 68, 68, 0.15)";
+        safetyBadge.style.color = "#f87171";
+        safetyBadge.style.borderColor = "rgba(239, 68, 68, 0.3)";
+      } else if (data.touch_enabled) {
+        safetyLabel.textContent = "⚠️ Touch Active (Autonomous)";
+        safetyBadge.style.background = "rgba(245, 158, 11, 0.15)";
+        safetyBadge.style.color = "#fbbf24";
+        safetyBadge.style.borderColor = "rgba(245, 158, 11, 0.3)";
+      } else {
+        safetyLabel.textContent = "🛡️ Touch Disabled (Safe)";
+        safetyBadge.style.background = "rgba(16, 185, 129, 0.15)";
+        safetyBadge.style.color = "#10b981";
+        safetyBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+      }
+    }
+
+    // Update Quick Toggle Buttons
+    const btnBoxes = document.getElementById("btn-toggle-boxes");
+    if (btnBoxes) {
+      btnBoxes.textContent = data.detection_overlay ? "👁️ Detection Boxes: ON" : "👁️ Detection Boxes: OFF";
+      btnBoxes.style.color = data.detection_overlay ? "#38bdf8" : "#94a3b8";
+    }
+
+    const btnAuto = document.getElementById("btn-toggle-auto");
+    if (btnAuto) {
+      btnAuto.textContent = data.automation_enabled ? "⚔️ Automation: ACTIVE" : "🛡️ Touch Inputs: DISABLED";
+      btnAuto.style.color = data.automation_enabled ? "#fbbf24" : "#10b981";
+      btnAuto.style.borderColor = data.automation_enabled ? "rgba(245, 158, 11, 0.4)" : "rgba(16, 185, 129, 0.4)";
     }
 
     // Update Status Pill
@@ -109,10 +232,85 @@ async function fetchLogs() {
   }
 }
 
-// Refresh viewport screen frame
+// Reconnect / refresh live video stream
 function refreshFrame() {
-  const img = document.getElementById("live-screen-img");
-  img.src = "/api/frame?t=" + new Date().getTime();
+  initLiveVideoStream();
+  fetchDetections();
+}
+
+// Fetch CV Perception / Identified Elements (Phase 1)
+async function fetchDetections() {
+  try {
+    const res = await fetch("/api/detections");
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const stateEl = document.getElementById("current-screen-state");
+    if (stateEl) {
+      stateEl.textContent = `State: ${(data.state || "UNKNOWN").toUpperCase()}`;
+    }
+
+    const badgeEl = document.getElementById("detected-count-badge");
+    if (badgeEl) {
+      badgeEl.textContent = `${data.count || (data.entities ? data.entities.length : 0)} Identified`;
+    }
+
+    const container = document.getElementById("detections-container");
+    if (!container) return;
+
+    if (!data.entities || data.entities.length === 0) {
+      container.innerHTML = `<div style="color: #64748b; font-size: 13px; grid-column: 1 / -1; padding: 12px 0;">No game elements recognized in current view. Open Clash of Clans on phone.</div>`;
+      return;
+    }
+
+    container.innerHTML = data.entities
+      .map(ent => {
+        const cat = ent.category || "hud";
+        const confPct = Math.round((ent.confidence !== undefined ? ent.confidence : 1.0) * 100);
+        const bboxStr = ent.bbox ? `[${ent.bbox.join(", ")}]` : "N/A";
+        return `
+          <div class="detection-item">
+            <div class="detection-header">
+              <span class="detection-category cat-${cat}">${cat}</span>
+              <span class="detection-conf">${confPct}%</span>
+            </div>
+            <div class="detection-title">${escapeHtml(ent.label || ent.id || "Element")}</div>
+            <div class="detection-coords">${bboxStr}</div>
+          </div>
+        `;
+      })
+      .join("");
+  } catch (err) {
+    console.error("Detections fetch failed:", err);
+  }
+}
+
+// Toggle HUD Bounding Boxes on/off
+async function toggleDetectionBoxes() {
+  try {
+    const res = await fetch("/api/overlay/toggle", { method: "POST" });
+    const data = await res.json();
+    fetchStatus();
+    fetchDetections();
+  } catch (err) {
+    alert("Failed to toggle detection overlay: " + err);
+  }
+}
+
+// Toggle Autonomous Attacks & Touch Inputs
+async function toggleAutomationMode() {
+  const currentText = document.getElementById("btn-toggle-auto")?.textContent || "";
+  const isEnabling = currentText.includes("DISABLED");
+  if (isEnabling) {
+    const ok = confirm("⚠️ SAFETY CONFIRMATION:\n\nDo you want to ENABLE autonomous touch inputs & attacking?\n\n(AutoFarm will only tap when Clash of Clans is foregrounded, and never touch other apps).");
+    if (!ok) return;
+  }
+  try {
+    await fetch("/api/automation/toggle", { method: "POST" });
+    fetchStatus();
+  } catch (err) {
+    alert("Failed to toggle automation: " + err);
+  }
 }
 
 // Start Bot

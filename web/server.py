@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import cv2
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -76,18 +76,155 @@ def create_app(bot_engine: BotEngine) -> FastAPI:
         res = bot_engine.trainer.train_army()
         return {"success": res}
 
+    @app.get("/api/detections")
+    def get_detections():
+        """Returns the cached list of recognized entities and HUD bounding boxes instantly."""
+        entities, state = bot_engine.vision.get_cached_detections()
+        if not entities:
+            frame = bot_engine.device.capture_frame()
+            if frame is not None:
+                entities = bot_engine.vision.detect_all_entities(frame)
+                state = bot_engine.vision.detect_state(frame)
+                bot_engine.vision.update_cached_detections(entities, state)
+        return {"state": state, "entities": entities, "count": len(entities)}
+
+    @app.post("/api/overlay/toggle")
+    def toggle_detection_overlay():
+        """Toggles real-time visual bounding box overlay on/off."""
+        bot_engine.detection_overlay = not getattr(bot_engine, "detection_overlay", True)
+        return {"detection_overlay": bot_engine.detection_overlay}
+
+    @app.post("/api/automation/toggle")
+    def toggle_automation():
+        """Toggles autonomous touch inputs & attacking on/off."""
+        bot_engine.automation_enabled = not getattr(bot_engine, "automation_enabled", False)
+        if hasattr(bot_engine.device, "set_touch_enabled"):
+            bot_engine.device.set_touch_enabled(bot_engine.automation_enabled)
+        return {
+            "automation_enabled": bot_engine.automation_enabled,
+            "touch_enabled": getattr(bot_engine.device, "touch_enabled", False),
+        }
+
     @app.get("/api/frame")
     def get_frame():
-        """Returns the current screen as a JPEG image."""
+        """Returns the current screen with or without HUD bounding box overlay."""
         try:
+            if getattr(bot_engine, "detection_overlay", True):
+                frame = bot_engine.device.capture_frame()
+                if frame is not None:
+                    annotated = bot_engine.vision.draw_detection_overlay(
+                        frame, inspection_mode=not getattr(bot_engine, "automation_enabled", False)
+                    )
+                    success, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if success:
+                        return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
+            if hasattr(bot_engine.device, "capture_frame_jpeg"):
+                jpeg = bot_engine.device.capture_frame_jpeg()
+                if jpeg:
+                    return Response(content=jpeg, media_type="image/jpeg")
             frame = bot_engine.device.capture_frame()
-            # Encode as JPEG
             success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to encode frame")
             return Response(content=buffer.tobytes(), media_type="image/jpeg")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/stream")
+    def stream_live_video():
+        """
+        True real-time continuous video feed using MJPEG (multipart/x-mixed-replace).
+        Includes real-time visual bounding box overlay when inspection mode is active.
+        """
+        import time
+
+        def iter_stream():
+            while True:
+                try:
+                    jpeg_bytes = None
+                    if getattr(bot_engine, "detection_overlay", True):
+                        frame = bot_engine.device.capture_frame()
+                        if frame is not None:
+                            annotated = bot_engine.vision.draw_detection_overlay(
+                                frame, inspection_mode=not getattr(bot_engine, "automation_enabled", False)
+                            )
+                            ok, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                            if ok:
+                                jpeg_bytes = buffer.tobytes()
+
+                    if not jpeg_bytes:
+                        if hasattr(bot_engine.device, "capture_frame_jpeg"):
+                            jpeg_bytes = bot_engine.device.capture_frame_jpeg()
+                        if not jpeg_bytes:
+                            frame = bot_engine.device.capture_frame()
+                            if frame is not None:
+                                ok, buffer = cv2.imencode(
+                                    ".jpg",
+                                    frame,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 72]
+                                )
+                                if ok:
+                                    jpeg_bytes = buffer.tobytes()
+
+                    if jpeg_bytes:
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            b"Content-Length: " + str(len(jpeg_bytes)).encode() + b"\r\n\r\n"
+                            + jpeg_bytes
+                            + b"\r\n"
+                        )
+                    time.sleep(0.04)  # ~25 FPS real-time broadcast with overlay
+                except Exception:
+                    time.sleep(0.05)
+
+        return StreamingResponse(
+            iter_stream(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Connection": "close",
+            },
+        )
+
+    @app.websocket("/ws/stream")
+    async def websocket_video_stream(websocket: WebSocket):
+        """Ultra-low latency WebSocket binary JPEG stream for instant 30 FPS video with boxes."""
+        import asyncio
+        await websocket.accept()
+        try:
+            while True:
+                jpeg_bytes = None
+                if getattr(bot_engine, "detection_overlay", True):
+                    frame = bot_engine.device.capture_frame()
+                    if frame is not None:
+                        annotated = bot_engine.vision.draw_detection_overlay(
+                            frame, inspection_mode=not getattr(bot_engine, "automation_enabled", False)
+                        )
+                        ok, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                        if ok:
+                            jpeg_bytes = buffer.tobytes()
+
+                if not jpeg_bytes:
+                    if hasattr(bot_engine.device, "capture_frame_jpeg"):
+                        jpeg_bytes = bot_engine.device.capture_frame_jpeg()
+                    if not jpeg_bytes:
+                        frame = bot_engine.device.capture_frame()
+                        if frame is not None:
+                            ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                            if ok:
+                                jpeg_bytes = buffer.tobytes()
+
+                if jpeg_bytes:
+                    await websocket.send_bytes(jpeg_bytes)
+                await asyncio.sleep(0.04)  # ~25 FPS
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
+        except Exception:
+            pass
 
     @app.get("/api/config")
     def get_configuration():

@@ -10,13 +10,20 @@ __pycache__/
 *.so
 
 # Binaries & Android SDK downloads
+bin/
 bin/platform-tools/
+bin/scrcpy/
+bin/ffmpeg
 bin/*.zip
 
 # Scratch files & temporary captures
 scratch/
 real_screen.png
 *.log
+*.mkv
+*.bin
+*_stderr.txt
+scrcpy_stderr.txt
 
 # OS metadata
 .DS_Store

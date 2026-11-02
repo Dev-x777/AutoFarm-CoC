@@ -24,6 +24,10 @@
     </div>
 
     <div class="system-status">
+      <div id="safety-shield-badge" class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3);">
+        <span class="status-dot" style="background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
+        <span id="safety-label">🛡️ Touch Disabled (Safe)</span>
+      </div>
       <div id="device-badge" class="badge badge-device">
         <span class="status-dot"></span>
         <span id="device-label">Detecting Device...</span>
@@ -96,6 +100,7 @@
         <div class="card-header">
           <div class="card-title">
             <span class="icon">📺</span> Live Device Feed
+            <span style="font-size: 0.72rem; font-weight: 700; color: #10b981; background: rgba(16, 185, 129, 0.15); padding: 2px 8px; border-radius: 9999px; border: 1px solid rgba(16, 185, 129, 0.3); margin-left: 8px;">● REAL-TIME (30 FPS)</span>
           </div>
           <div class="live-action-indicator">
             <span class="action-pulse"></span>
@@ -104,22 +109,39 @@
         </div>
 
         <div class="screen-wrapper">
-          <img id="live-screen-img" src="/api/frame" alt="Clash of Clans Live Viewport" />
+          <img id="live-screen-img" src="/api/frame" alt="Clash of Clans Real-Time Live Feed" />
           <div class="screen-overlay" id="screen-overlay">
             <span id="overlay-status-pill">State: Synchronizing...</span>
           </div>
         </div>
 
         <div class="quick-manual-controls">
-          <button id="btn-force-walls" class="btn btn-outline" onclick="triggerWallUpgrade()">
-            🧱 Upgrade Walls Now
-          </button>
-          <button id="btn-force-train" class="btn btn-outline" onclick="triggerTrainArmy()">
-            ⚔️ Train Army Now
+          <button id="btn-toggle-boxes" class="btn btn-outline" onclick="toggleDetectionBoxes()">
+            👁️ Detection Boxes: ON
           </button>
           <button id="btn-refresh-feed" class="btn btn-outline" onclick="refreshFrame()">
             🔄 Refresh Frame
           </button>
+          <button id="btn-toggle-auto" class="btn btn-outline" onclick="toggleAutomationMode()" style="color: #10b981; border-color: rgba(16, 185, 129, 0.4);">
+            🛡️ Touch Inputs: DISABLED
+          </button>
+        </div>
+
+        <!-- Phase 1: Real-Time CV Perception & Identified Elements Card -->
+        <div class="card detections-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="icon">👁️</span> Identified Game Elements
+              <span id="detected-count-badge" style="font-size: 0.72rem; font-weight: 700; color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 2px 8px; border-radius: 9999px; border: 1px solid rgba(56, 189, 248, 0.3); margin-left: 8px;">0 Detected</span>
+            </div>
+            <div class="live-action-indicator" style="background: rgba(168, 85, 247, 0.15); border-color: rgba(168, 85, 247, 0.3); color: #c084fc;">
+              <span class="action-pulse" style="background: #c084fc; box-shadow: 0 0 6px #c084fc;"></span>
+              <span id="current-screen-state">State: Detecting...</span>
+            </div>
+          </div>
+          <div id="detections-container" class="detections-grid">
+            <div style="color: #64748b; font-size: 13px; grid-column: 1 / -1; padding: 12px 0;">Scanning village for resource bars, buttons, and defenses...</div>
+          </div>
         </div>
       </section>
 

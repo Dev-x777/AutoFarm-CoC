@@ -1,11 +1,12 @@
 device:
-  mode: adb
-  adb_path: bin/platform-tools/adb
-  serial: 3C15A4000CV00000
+  mode: "adb"          # "adb" (real device), "mock" (simulation), or "auto"
+  adb_path: "bin/platform-tools/adb"   # Local ADB binary (already downloaded)
+  serial: "192.168.1.7:5555"           # Phone serial (Wireless ADB)
   resolution:
     width: 1920
     height: 1080
 farming:
+  battle_mode: "regular"    # "regular" (unlimited attacks, no trophy loss), "ranked" (6/day), "builder_base"
   min_gold: 800000
   min_elixir: 800000
   min_dark_elixir: 3500
@@ -18,6 +19,8 @@ attack:
   strategy: collector_snipe
   preferred_troop: sneaky_goblin
   troops_per_collector: 3
+  tap_cadence_min: 0.12     # Controlled 120ms-260ms tap cadence
+  tap_cadence_max: 0.26
   early_surrender: true
   loot_depletion_threshold: 0.85
   stagnant_seconds: 7
@@ -39,6 +42,7 @@ walls:
     - 460
 training:
   auto_train: true
+  instant_training: true    # Modern CoC: Zero training waiting period
   quick_train_slot: 1
   min_army_capacity_pct: 85
 home:
